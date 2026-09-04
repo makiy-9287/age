@@ -13,66 +13,78 @@ from __future__ import annotations
 import logging
 
 import config
-from core import features, smc
+from core import smc
 from storage import db
 from tg import send as tg
 
 log = logging.getLogger("tools")
 
-TOOLS = [
-    {"type": "function", "function": {
-        "name": "fetch_candles",
-        "description": ("Recent OHLCV for one symbol/timeframe from the live "
-                        "websocket store. Use only when the snapshot is not "
-                        "enough to judge a setup."),
-        "parameters": {"type": "object", "properties": {
-            "symbol": {"type": "string", "description": "exact symbol from the snapshot"},
-            "timeframe": {"type": "string", "enum": config.TIMEFRAMES},
-            "limit": {"type": "integer", "description": f"1-{config.MAX_TOOL_CANDLES}"}},
-            "required": ["symbol", "timeframe"]}}},
-    {"type": "function", "function": {
-        "name": "compute_indicators",
-        "description": ("Full pandas_ta indicator set (RSI, EMA20/50/200, ATR, "
-                        "MACD, Bollinger, volume) for one symbol/timeframe."),
-        "parameters": {"type": "object", "properties": {
-            "symbol": {"type": "string"},
-            "timeframe": {"type": "string", "enum": config.TIMEFRAMES}},
-            "required": ["symbol", "timeframe"]}}},
-    {"type": "function", "function": {
-        "name": "get_zones",
-        "description": ("Every order block, breaker block and fair value gap on "
-                        "one timeframe with volume, quote value and resting "
-                        "liquidity - more than the snapshot's trimmed list."),
-        "parameters": {"type": "object", "properties": {
-            "symbol": {"type": "string"},
-            "timeframe": {"type": "string", "enum": config.TIMEFRAMES}},
-            "required": ["symbol", "timeframe"]}}},
-    {"type": "function", "function": {
-        "name": "send_signal",
-        "description": ("Dispatch one validated A+ SMC/ICT sniper setup to "
-                        "Telegram. Call once per qualifying coin."),
-        "parameters": {"type": "object", "properties": {
-            "symbol": {"type": "string"},
-            "direction": {"type": "string", "enum": ["LONG", "SHORT"]},
-            "mode": {"type": "string", "enum": ["day", "swing"]},
-            "entry_type": {"type": "string", "enum": ["CMP", "LIMIT"]},
-            "entry_low": {"type": "number"}, "entry_high": {"type": "number"},
-            "stop_loss": {"type": "number"},
-            "tp1": {"type": "number"}, "tp2": {"type": "number"},
-            "tp3": {"type": "number"},
-            "confidence": {"type": "integer", "description": "1-10, send only >=7"},
-            "htf_bias": {"type": "string"},
-            "entry_tf": {"type": "string", "enum": config.TIMEFRAMES},
-            "poi": {"type": "string",
-                    "enum": ["FVG", "OB", "BREAKER", "OTE", "SWEEP"]},
-            "confirmations": {"type": "array", "items": {"type": "string"},
-                              "description": "at least 3, one from 1h or 4h"},
-            "reasoning": {"type": "string"}},
-            "required": ["symbol", "direction", "mode", "entry_type", "entry_low",
-                         "entry_high", "stop_loss", "tp1", "tp2", "tp3",
-                         "confidence", "htf_bias", "entry_tf", "poi",
-                         "confirmations", "reasoning"]}}},
-]
+SIGNAL_FN = {"type": "function", "function": {
+    "name": "send_signal",
+    "description": "Dispatch one validated A+ SMC/ICT setup to Telegram.",
+    "parameters": {"type": "object", "properties": {
+        "symbol": {"type": "string"},
+        "direction": {"type": "string", "enum": ["LONG", "SHORT"]},
+        "mode": {"type": "string", "enum": ["day", "swing"]},
+        "entry_type": {"type": "string", "enum": ["CMP", "LIMIT"]},
+        "entry_low": {"type": "number"}, "entry_high": {"type": "number"},
+        "stop_loss": {"type": "number"},
+        "tp1": {"type": "number"}, "tp2": {"type": "number"},
+        "tp3": {"type": "number"},
+        "confidence": {"type": "integer", "description": "1-10, send only >=7"},
+        "htf_bias": {"type": "string", "description": "the 4h narrative"},
+        "entry_tf": {"type": "string", "enum": ["1h", "4h"]},
+        "poi": {"type": "string",
+                "enum": ["FVG", "OB", "BREAKER", "OTE", "SWEEP"]},
+        "confirmations": {"type": "array", "items": {"type": "string"},
+                          "description": "at least 3"},
+        "reasoning": {"type": "string"}},
+        "required": ["symbol", "direction", "mode", "entry_type", "entry_low",
+                     "entry_high", "stop_loss", "tp1", "tp2", "tp3",
+                     "confidence", "htf_bias", "entry_tf", "poi",
+                     "confirmations", "reasoning"]}}}
+
+GET_1H_FN = {"type": "function", "function": {
+    "name": "get_1h_context",
+    "description": ("Return the 1h structural payload for ONE coin whose 4h "
+                    "scan showed a live POI near CMP. Costs tokens - only call "
+                    "it for coins you would actually trade."),
+    "parameters": {"type": "object", "properties": {
+        "symbol": {"type": "string"},
+        "reason": {"type": "string",
+                   "description": "which 4h POI and why, in one line"}},
+        "required": ["symbol", "reason"]}}}
+
+WATCH_FN = {"type": "function", "function": {
+    "name": "watch_hourly",
+    "description": ("Put a coin under hourly re-check until its trigger fires "
+                    "or it invalidates. Use when the entry is close but needs "
+                    "another 1h candle."),
+    "parameters": {"type": "object", "properties": {
+        "symbol": {"type": "string"},
+        "bias": {"type": "string"},
+        "poi": {"type": "string", "description": "the zone being watched"},
+        "trigger": {"type": "string", "description": "concrete entry condition"},
+        "invalidation": {"type": "string", "description": "concrete price level"}},
+        "required": ["symbol", "bias", "poi", "trigger", "invalidation"]}}}
+
+KEEP_FN = {"type": "function", "function": {
+    "name": "keep_watching",
+    "description": "Setup still forming, invalidation not hit. Stay on watch.",
+    "parameters": {"type": "object", "properties": {
+        "symbol": {"type": "string"}, "note": {"type": "string"}},
+        "required": ["symbol", "note"]}}}
+
+DROP_FN = {"type": "function", "function": {
+    "name": "drop_watch",
+    "description": "Setup is dead or invalidated. Stop watching this coin.",
+    "parameters": {"type": "object", "properties": {
+        "symbol": {"type": "string"}, "reason": {"type": "string"}},
+        "required": ["symbol", "reason"]}}}
+
+SCAN_TOOLS = [GET_1H_FN]
+DRILL_TOOLS = [SIGNAL_FN, WATCH_FN]
+WATCH_TOOLS = [SIGNAL_FN, KEEP_FN, DROP_FN]
 
 
 class Rejected(Exception):
@@ -137,64 +149,64 @@ def _validate(a: dict, known: set[str]) -> dict:
 
 
 class ToolBox:
-    """Binds the tool names to the live market stream."""
+    """Binds tool names to the live market stream."""
 
     def __init__(self, stream):
         self.stream = stream
-        self.known: set[str] = set()       # short names sent to the agent
-        self.symbols: dict[str, str] = {}  # short -> full ccxt symbol
+        self.known: set[str] = set()
+        self.symbols: dict[str, str] = {}
+        self.drills: list[tuple[str, str]] = []   # (symbol, reason) requested
+        self.watch_calls: list[dict] = []
+        self.drop_calls: list[dict] = []
+        self.keep_calls: list[dict] = []
 
     def resolve(self, name: str) -> str:
         name = (name or "").strip()
         return self.symbols.get(name, self.symbols.get(name.split(":")[0], name))
 
-    # ------------------------------------------------------------ read tools
-    def fetch_candles(self, symbol: str, timeframe: str, limit: int = 30) -> dict:
-        symbol = self.resolve(symbol)
-        df = self.stream.get(symbol, timeframe)
-        if df is None or not len(df):
-            return {"error": "no data"}
-        n = max(1, min(int(limit or 30), config.MAX_TOOL_CANDLES))
-        tail = df.iloc[-n:]
-        price = float(df["close"].iloc[-1])
-        return {"symbol": symbol, "timeframe": timeframe,
-                "format": "[open,high,low,close,volume] oldest first",
-                "candles": [[smc.rnd(r.open, price), smc.rnd(r.high, price),
-                             smc.rnd(r.low, price), smc.rnd(r.close, price),
-                             int(r.volume)] for r in tail.itertuples()]}
+    # -------------------------------------------------------- stage 1 request
+    def request_1h(self, symbol: str, reason: str) -> dict:
+        full = self.resolve(symbol)
+        if self.stream.get(full, config.LTF) is None:
+            return {"error": f"no 1h data for {symbol}"}
+        if len(self.drills) >= config.MAX_DRILLDOWNS:
+            return {"error": "drill-down budget for this scan is used up"}
+        if any(sym == full for sym, _ in self.drills):
+            return {"status": "already queued"}
+        self.drills.append((full, reason))
+        return {"status": "queued",
+                "note": "1h payload will be delivered in the next stage"}
 
-    def compute_indicators(self, symbol: str, timeframe: str) -> dict:
-        symbol = self.resolve(symbol)
-        df = self.stream.get(symbol, timeframe)
-        if df is None or len(df) < 60:
-            return {"error": "no data"}
-        import pandas_ta as ta
-        ind = features.indicators(df)
-        ind.pop("_atr_abs", None)
-        close = df["close"]
-        macd = ta.macd(close)
-        bb = ta.bbands(close, length=20)
-        price = float(close.iloc[-1])
-        if macd is not None and len(macd.dropna()):
-            row = macd.dropna().iloc[-1]
-            ind["macd"] = [round(float(x), 6) for x in row.tolist()[:3]]
-        if bb is not None and len(bb.dropna()):
-            row = bb.dropna().iloc[-1].tolist()
-            ind["bb"] = [smc.rnd(row[0], price), smc.rnd(row[1], price),
-                         smc.rnd(row[2], price)]
-        return {"symbol": symbol, "timeframe": timeframe, "indicators": ind}
+    # --------------------------------------------------------- watch handling
+    def watch(self, a: dict) -> dict:
+        sym = self.resolve(a.get("symbol", ""))
+        if not sym or self.stream.get(sym, config.LTF) is None:
+            return {"error": "unknown symbol"}
+        if len(db.watches()) >= config.MAX_WATCHES:
+            return {"error": "watch list is full"}
+        db.add_watch(sym, config.WATCH_MAX_HOURS,
+                     bias=str(a.get("bias", ""))[:120],
+                     poi=str(a.get("poi", ""))[:120],
+                     trigger=str(a.get("trigger", ""))[:200],
+                     invalidation=str(a.get("invalidation", ""))[:120])
+        self.watch_calls.append({"symbol": sym})
+        log.info("WATCH  %s · trigger: %s", sym.split(":")[0],
+                 str(a.get("trigger", ""))[:80])
+        return {"status": "watching", "expires_hours": config.WATCH_MAX_HOURS}
 
-    def get_zones(self, symbol: str, timeframe: str) -> dict:
-        symbol = self.resolve(symbol)
-        df = self.stream.get(symbol, timeframe)
-        if df is None or len(df) < 60:
-            return {"error": "no data"}
-        price = float(df["close"].iloc[-1])
-        blk = features.timeframe_block(df, price)
-        return {"symbol": symbol, "timeframe": timeframe,
-                "fvg": blk.get("fvg", []), "ob": blk.get("ob", []),
-                "bb": blk.get("bb", []), "liq": blk.get("liq", {}),
-                "rng": blk.get("rng")}
+    def keep(self, a: dict) -> dict:
+        sym = self.resolve(a.get("symbol", ""))
+        db.bump_watch(sym)
+        self.keep_calls.append({"symbol": sym})
+        log.info("  keep  %s · %s", sym.split(":")[0], str(a.get("note", ""))[:80])
+        return {"status": "still watching"}
+
+    def drop(self, a: dict) -> dict:
+        sym = self.resolve(a.get("symbol", ""))
+        db.drop_watch(sym)
+        self.drop_calls.append({"symbol": sym})
+        log.info("  drop  %s · %s", sym.split(":")[0], str(a.get("reason", ""))[:80])
+        return {"status": "dropped"}
 
     # ------------------------------------------------------------ write tool
     async def send_signal(self, args: dict) -> dict:
@@ -220,6 +232,7 @@ class ToolBox:
 
         sid = db.insert(s)
         db.event(sid, "CREATED", s.get("entry_price"), s["poi"])
+        db.drop_watch(s["symbol"])
         mid = await tg.send(tg.signal_text(s, sid))
         if mid:
             db.update(sid, msg_id=mid)

@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   signal_id INTEGER, ts INTEGER, event TEXT, price REAL, note TEXT);
 
+CREATE TABLE IF NOT EXISTS watches (
+  symbol TEXT PRIMARY KEY, created_at INTEGER, expires_at INTEGER,
+  bias TEXT, poi TEXT, trigger TEXT, invalidation TEXT, checks INTEGER DEFAULT 0);
+
 CREATE TABLE IF NOT EXISTS usage (
   day TEXT PRIMARY KEY, requests INTEGER DEFAULT 0, hit INTEGER DEFAULT 0,
   miss INTEGER DEFAULT 0, out INTEGER DEFAULT 0);
@@ -169,3 +173,45 @@ def cost_of(row) -> float:
     return (row["hit"] / 1e6 * config.PRICE_IN_HIT
             + row["miss"] / 1e6 * config.PRICE_IN_MISS
             + row["out"] / 1e6 * config.PRICE_OUT)
+
+
+# --------------------------------------------------------------------- watches
+def add_watch(symbol: str, hours: int, **f):
+    with _LOCK:
+        c = conn()
+        c.execute("""INSERT INTO watches (symbol,created_at,expires_at,bias,poi,
+                     trigger,invalidation,checks) VALUES (?,?,?,?,?,?,?,0)
+                     ON CONFLICT(symbol) DO UPDATE SET expires_at=?, bias=?,
+                     poi=?, trigger=?, invalidation=?""",
+                  (symbol, now(), now() + hours * 3600, f.get("bias"), f.get("poi"),
+                   f.get("trigger"), f.get("invalidation"),
+                   now() + hours * 3600, f.get("bias"), f.get("poi"),
+                   f.get("trigger"), f.get("invalidation")))
+        c.commit()
+
+
+def watches():
+    return conn().execute("SELECT * FROM watches WHERE expires_at>? ORDER BY created_at",
+                          (now(),)).fetchall()
+
+
+def drop_watch(symbol: str):
+    with _LOCK:
+        c = conn()
+        c.execute("DELETE FROM watches WHERE symbol=?", (symbol,))
+        c.commit()
+
+
+def bump_watch(symbol: str):
+    with _LOCK:
+        c = conn()
+        c.execute("UPDATE watches SET checks=checks+1 WHERE symbol=?", (symbol,))
+        c.commit()
+
+
+def purge_watches():
+    with _LOCK:
+        c = conn()
+        n = c.execute("DELETE FROM watches WHERE expires_at<=?", (now(),)).rowcount
+        c.commit()
+    return n

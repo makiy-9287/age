@@ -41,6 +41,7 @@ async def help_(u, c):
     if ok(u):
         await reply(u, "/active — open &amp; pending\n/pnl [24h|7d|30d|all]\n"
                        "/report [24h|7d]\n/last [n]\n/cost — token spend\n"
+                       "/watch — coins under hourly watch\n"
                        "/status — scanner state\n/close ID\n/pause /resume")
 
 
@@ -147,6 +148,26 @@ async def cost(u, c):
     await reply(u, "\n".join(out))
 
 
+async def watch(u, c):
+    if not ok(u):
+        return
+    rows = db.watches()
+    if not rows:
+        await reply(u, "Nothing under hourly watch.")
+        return
+    st = STATE.get("stream")
+    out = [f"<b>Hourly watch ({len(rows)})</b>"]
+    for r in rows:
+        p = st.price(r["symbol"]) if st else None
+        mins = (int(time.time()) - r["created_at"]) // 60
+        out.append(f"\n<b>{e(r['symbol'].split(':')[0])}</b> · {r['bias']} · "
+                   f"{mins//60}h{mins%60:02d}m · {r['checks']} checks"
+                   + (f" · now {fmt(p)}" if p else "") +
+                   f"\n  POI {e(r['poi'])}\n  trigger: {e(r['trigger'])}"
+                   f"\n  invalid: {e(r['invalidation'])}")
+    await reply(u, "\n".join(out))
+
+
 async def status(u, c):
     if not ok(u):
         return
@@ -157,11 +178,11 @@ async def status(u, c):
            f"Window {config.ACTIVE_START:%H:%M}–{config.ACTIVE_END:%H:%M} · "
            f"{'ACTIVE' if STATE.get('in_window') else 'IDLE'}",
            f"Dispatch {'PAUSED' if STATE.get('paused') else 'ON'}",
-           f"Universe {len(st.universe) if st else '-'} coins "
-           f"(&gt;{config.MIN_24H_QUOTE_VOLUME / 1e6:.0f}M)",
-           f"Scan every {config.SCAN_SECONDS // 60}m (15m close) · monitor every "
-           f"{config.MONITOR_SECONDS}s",
-           f"Gate: CMP within {config.GATE_NEAR_PCT}% of a level",
+           f"Watchlist: top {len(st.universe) if st else '-'} by 24h volume",
+           f"Scan on each {config.HTF} close · drill on {config.LTF} · "
+           f"monitor {config.MONITOR_SECONDS}s",
+           f"POI threshold {config.POI_MAX_DIST_PCT}% from CMP",
+           f"Under watch: {len(db.watches())}",
            f"Open signals {len(db.open_signals())}"]
     if STATE.get("last_scan"):
         out.append(f"Last scan {STATE['last_scan']}")
@@ -207,7 +228,7 @@ def build() -> Application:
     app = Application.builder().token(config.TG_TOKEN).build()
     for name, fn in {"start": start, "help": help_, "active": active, "pnl": pnl,
                      "report": report, "last": last, "cost": cost,
-                     "status": status, "close": close, "pause": pause,
+                     "status": status, "close": close, "pause": pause, "watch": watch,
                      "resume": resume}.items():
         app.add_handler(CommandHandler(name, fn))
     return app

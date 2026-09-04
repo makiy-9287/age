@@ -49,20 +49,28 @@ class MarketStream:
                         "chg": float(t.get("percentage") or 0.0)})
             self.prices[sym] = float(t.get("last") or 0.0)
         out.sort(key=lambda x: -x["qv24"])
+        out = out[:config.WATCHLIST_SIZE]
+        prev = {u["symbol"] for u in self.universe}
         self.universe = out
-        log.info("universe: %d symbols over %.0fM 24h volume",
-                 len(out), config.MIN_24H_QUOTE_VOLUME / 1e6)
+        now = {u["symbol"] for u in out}
+        if prev and prev != now:
+            added = ", ".join(s.split(":")[0] for s in sorted(now - prev)) or "-"
+            gone = ", ".join(s.split(":")[0] for s in sorted(prev - now)) or "-"
+            log.info("watchlist changed  +[%s]  -[%s]", added, gone)
+        log.info("watchlist: top %d by 24h volume (%.0fM - %.0fM)",
+                 len(out), out[0]["qv24"] / 1e6 if out else 0,
+                 out[-1]["qv24"] / 1e6 if out else 0)
         return out
 
-    async def seed(self):
-        """One-off REST backfill of `CANDLES` bars for every symbol/timeframe."""
+    async def seed(self, only: list[str] | None = None):
+        """REST backfill: HTF_CANDLES on 4h, LTF_CANDLES on 1h."""
         sem = asyncio.Semaphore(8)
 
-        async def one(sym, tf):
+        async def one(sym, tf, limit):
             async with sem:
                 for attempt in range(3):
                     try:
-                        raw = await self.ex.fetch_ohlcv(sym, tf, limit=config.CANDLES)
+                        raw = await self.ex.fetch_ohlcv(sym, tf, limit=limit)
                         if raw and len(raw) >= 60:
                             df = pd.DataFrame(raw, columns=COLS)
                             self.frames.setdefault(sym, {})[tf] = df
@@ -72,11 +80,15 @@ class MarketStream:
                             log.debug("seed failed %s %s: %s", sym, tf, e)
                         await asyncio.sleep(1 + attempt)
 
-        jobs = [one(u["symbol"], tf) for u in self.universe for tf in config.TIMEFRAMES]
+        limits = {config.HTF: config.HTF_CANDLES, config.LTF: config.LTF_CANDLES}
+        targets = only or [u["symbol"] for u in self.universe]
+        jobs = [one(sym, tf, limits[tf]) for sym in targets
+                for tf in config.TIMEFRAMES]
         await asyncio.gather(*jobs)
-        ready = sum(1 for s in self.frames if len(self.frames[s]) == len(config.TIMEFRAMES))
-        log.info("seeded %d/%d symbols x %d timeframes",
-                 ready, len(self.universe), len(config.TIMEFRAMES))
+        ready = sum(1 for s in self.frames
+                    if len(self.frames[s]) == len(config.TIMEFRAMES))
+        log.info("seeded %d/%d symbols (%s x%d, %s x%d)", ready, len(targets),
+                 config.HTF, config.HTF_CANDLES, config.LTF, config.LTF_CANDLES)
         self._seeded.set()
 
     # ------------------------------------------------------------- websockets
@@ -121,8 +133,28 @@ class MarketStream:
                 df.iloc[-1] = row
             elif not len(df) or ts > int(df.iat[-1, 0]):
                 df.loc[len(df)] = row
-        if len(df) > config.CANDLES:
-            self.frames[sym][tf] = df.iloc[-config.CANDLES:].reset_index(drop=True)
+        cap = config.HTF_CANDLES if tf == config.HTF else config.LTF_CANDLES
+        if len(df) > cap:
+            self.frames[sym][tf] = df.iloc[-cap:].reset_index(drop=True)
+
+    async def refresh_watchlist(self):
+        """Daily 05:00 rebuild of the top-50 list, then seed anything new."""
+        await self.load_universe()
+        missing = [u["symbol"] for u in self.universe if u["symbol"] not in self.frames]
+        if missing:
+            log.info("seeding %d new watchlist symbols", len(missing))
+            await self.seed(only=missing)
+        for sym in list(self.frames):
+            if sym not in {u["symbol"] for u in self.universe}:
+                self.frames.pop(sym, None)
+        await self.restart_sockets()
+
+    async def restart_sockets(self):
+        for t in self._tasks:
+            t.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks = [asyncio.create_task(self._run_ohlcv()),
+                       asyncio.create_task(self._run_tickers())]
 
     async def start(self):
         await self.load_universe()
@@ -149,7 +181,7 @@ class MarketStream:
         p = self.prices.get(symbol)
         if p:
             return p
-        df = self.get(symbol, "15m")
+        df = self.get(symbol, config.LTF)
         return float(df.iat[-1, 4]) if df is not None and len(df) else None
 
     def ready(self, symbol: str) -> bool:
