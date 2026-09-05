@@ -63,7 +63,7 @@ class MarketStream:
         return out
 
     async def seed(self, only: list[str] | None = None):
-        """REST backfill: HTF_CANDLES on 4h, LTF_CANDLES on 1h."""
+        """REST backfill: CANDLES bars on every timeframe."""
         sem = asyncio.Semaphore(8)
 
         async def one(sym, tf, limit):
@@ -80,9 +80,8 @@ class MarketStream:
                             log.debug("seed failed %s %s: %s", sym, tf, e)
                         await asyncio.sleep(1 + attempt)
 
-        limits = {config.HTF: config.HTF_CANDLES, config.LTF: config.LTF_CANDLES}
         targets = only or [u["symbol"] for u in self.universe]
-        jobs = [one(sym, tf, limits[tf]) for sym in targets
+        jobs = [one(sym, tf, config.CANDLES) for sym in targets
                 for tf in config.TIMEFRAMES]
         await asyncio.gather(*jobs)
         ready = sum(1 for s in self.frames

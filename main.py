@@ -38,8 +38,14 @@ class LocalTime(logging.Formatter):
     """
 
     def formatTime(self, record, datefmt=None):
-        dt = datetime.fromtimestamp(record.created, config.LOCAL_TZ)
-        return dt.strftime(datefmt or "%H:%M:%S")
+        # At interpreter shutdown strftime can fail with "sys.meta_path is
+        # None" because the import system is already gone. A logger must never
+        # be the thing that crashes teardown, so fall back to plain seconds.
+        try:
+            dt = datetime.fromtimestamp(record.created, config.LOCAL_TZ)
+            return dt.strftime(datefmt or "%H:%M:%S")
+        except Exception:
+            return str(int(record.created))
 
 
 def setup_logging():
@@ -301,7 +307,15 @@ async def amain():
              ", ".join(d.strftime("%a %H:%M") for d in upcoming) or "none in window")
 
     stream = MarketStream()
-    await stream.start()
+    try:
+        await stream.start()
+    except Exception:
+        # start() failing left an open aiohttp session; close it here or the
+        # interpreter tears down mid-socket and buries the real traceback
+        # under pages of ccxt __del__ and "Unclosed connector" noise.
+        log.error("startup failed - closing sockets before exit")
+        await stream.close()
+        raise
     tb = ToolBox(stream)
     agent = Agent(tb)
     monitor = Monitor(stream)

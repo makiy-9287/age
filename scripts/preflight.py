@@ -23,8 +23,7 @@ async def main() -> int:
     print(f"  watchlist    : top {config.WATCHLIST_SIZE}, rebuilt at "
           f"{config.WATCHLIST_REFRESH:%H:%M} {config.LOCAL_TZ.key}")
     print(f"  window       : {config.ACTIVE_START:%H:%M}-{config.ACTIVE_END:%H:%M}")
-    print(f"  data         : {config.HTF} x{config.HTF_CANDLES} scan, "
-          f"{config.LTF} x{config.LTF_CANDLES} drill")
+    print(f"  data         : {'/'.join(config.TIMEFRAMES)} x{config.CANDLES} each")
     print(f"  POI threshold: {config.POI_MAX_DIST_PCT}% from CMP")
     if not (config.API_KEY and config.TG_TOKEN and config.TG_CHAT):
         ok = False
