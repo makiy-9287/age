@@ -15,6 +15,32 @@ every 4h close  scan all 50 on 4h ──► agent screens for a POI near CMP
 always          open signals checked every 60s for SL / TP
 ```
 
+## Timezone — you do not need to change the server clock
+
+The schedule is anchored to `LOCAL_TZ` (Asia/Colombo) and to UTC candle
+boundaries, never to the server's clock. An Alibaba box defaults to
+Asia/Shanghai; the bot works correctly on it either way.
+
+What *was* confusing: log lines used to print in the server's timezone, so the
+log read 08:17 while your clock said 05:47 and the schedule looked broken when
+it was not. **Every log line now prints in `LOCAL_TZ`**, and startup prints all
+three clocks side by side plus the next four scan times:
+
+```
+clocks: server 08:17 (CST) · UTC 00:47 · 05:47 Asia/Colombo  <- all logs use Asia/Colombo
+window 05:00-21:00 Asia/Colombo · next scans: Sat 09:30, Sat 13:30, Sat 17:30, Sun 05:30
+```
+
+Changing the server timezone with `timedatectl set-timezone Asia/Colombo` is
+optional and makes no difference to behaviour.
+
+## Startup scan
+
+`SCAN_ON_START=1` (default) runs one scan immediately on boot rather than
+waiting for the next 4h close — starting at 05:47 no longer means idling until
+09:30. `MIN_RESCAN_MINUTES=60` guards it, so restarting the process repeatedly
+cannot trigger repeated scans. Outside the window it waits as normal.
+
 ## Schedule
 
 The 4h scan fires on the 4h candle close. In Sri Lanka time those land at

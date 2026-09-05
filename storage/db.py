@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS watches (
   symbol TEXT PRIMARY KEY, created_at INTEGER, expires_at INTEGER,
   bias TEXT, poi TEXT, trigger TEXT, invalidation TEXT, checks INTEGER DEFAULT 0);
 
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+
 CREATE TABLE IF NOT EXISTS usage (
   day TEXT PRIMARY KEY, requests INTEGER DEFAULT 0, hit INTEGER DEFAULT 0,
   miss INTEGER DEFAULT 0, out INTEGER DEFAULT 0);
@@ -215,3 +217,27 @@ def purge_watches():
         n = c.execute("DELETE FROM watches WHERE expires_at<=?", (now(),)).rowcount
         c.commit()
     return n
+
+
+# ------------------------------------------------------------------------ meta
+def set_meta(k: str, v):
+    with _LOCK:
+        c = conn()
+        c.execute("INSERT INTO meta (k,v) VALUES (?,?) "
+                  "ON CONFLICT(k) DO UPDATE SET v=?", (k, str(v), str(v)))
+        c.commit()
+
+
+def get_meta(k: str, default=None):
+    row = conn().execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+    return row["v"] if row else default
+
+
+def minutes_since(k: str) -> float:
+    v = get_meta(k)
+    if not v:
+        return 1e9
+    try:
+        return (now() - int(float(v))) / 60.0
+    except ValueError:
+        return 1e9

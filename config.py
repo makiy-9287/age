@@ -63,6 +63,11 @@ LTF_SECONDS = 3600
 ALIGN_OFFSET = _i("ALIGN_OFFSET", 20)               # seconds after the close
 WATCHLIST_REFRESH = _t("WATCHLIST_REFRESH", "05:00")  # daily, local time
 MONITOR_SECONDS = _i("MONITOR_SECONDS", 60)
+# Run one scan immediately on startup instead of waiting for the next 4h close,
+# so a restart mid-window is productive. Guarded by MIN_RESCAN_MINUTES so
+# repeated restarts cannot re-scan over and over.
+SCAN_ON_START = _i("SCAN_ON_START", 1)
+MIN_RESCAN_MINUTES = _i("MIN_RESCAN_MINUTES", 60)
 HEARTBEAT_SECONDS = _i("HEARTBEAT_SECONDS", 30)
 
 # ----------------------------------------------------------------- SMC engine

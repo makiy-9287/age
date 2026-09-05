@@ -13,7 +13,7 @@ import logging
 import logging.handlers
 import signal as sig
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import config
 from agent.client import Agent
@@ -29,14 +29,32 @@ C = {"g": "\033[32m", "y": "\033[33m", "c": "\033[36m", "d": "\033[2m",
      "b": "\033[1m", "0": "\033[0m"}
 
 
+class LocalTime(logging.Formatter):
+    """Timestamp every log line in LOCAL_TZ, not the server's timezone.
+
+    An Alibaba box defaults to Asia/Shanghai, so without this the log reads
+    08:17 while the trader's clock says 05:47 and the schedule looks broken
+    when it is not.
+    """
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, config.LOCAL_TZ)
+        return dt.strftime(datefmt or "%H:%M:%S")
+
+
 def setup_logging():
     fmt = (f"{C['d']}%(asctime)s{C['0']} %(levelname)-5s "
            f"{C['c']}%(name)-7s{C['0']} %(message)s")
-    logging.basicConfig(level=logging.INFO, format=fmt, datefmt="%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    sh = logging.StreamHandler()
+    sh.setFormatter(LocalTime(fmt, datefmt="%H:%M:%S"))
+    root.addHandler(sh)
     fh = logging.handlers.RotatingFileHandler(config.LOG_DIR / "agent.log",
                                               maxBytes=8_000_000, backupCount=3)
-    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-5s %(name)-7s %(message)s"))
-    logging.getLogger().addHandler(fh)
+    fh.setFormatter(LocalTime("%(asctime)s %(levelname)-5s %(name)-7s %(message)s",
+                              datefmt="%Y-%m-%d %H:%M:%S"))
+    root.addHandler(fh)
     for n in ("httpx", "httpcore", "telegram", "ccxt", "openai", "asyncio"):
         logging.getLogger(n).setLevel(logging.WARNING)
 
@@ -64,16 +82,31 @@ def next_close(step: int) -> float:
     return nxt - now
 
 
+def clear_line():
+    print(" " * 78, end="\r", flush=True)
+
+
 async def heartbeat(seconds: float, label: str):
     end = time.monotonic() + seconds
     while True:
         left = end - time.monotonic()
         if left <= 0:
+            clear_line()
             return
         m, s = divmod(int(left), 60)
         print(f"{C['d']}[{now_local():%Y-%m-%d %H:%M:%S}] {label} — "
               f"{m}m {s:02d}s{C['0']}", end="\r", flush=True)
         await asyncio.sleep(min(config.HEARTBEAT_SECONDS, max(1, left)))
+
+
+def upcoming_closes(n: int = 6) -> list[datetime]:
+    out, t = [], time.time()
+    step = config.HTF_SECONDS
+    nxt = (t // step + 1) * step
+    while len(out) < n:
+        out.append(datetime.fromtimestamp(nxt, config.LOCAL_TZ))
+        nxt += step
+    return out
 
 
 class Engine:
@@ -156,6 +189,7 @@ class Engine:
                  "%d watching · today $%.4f%s", C["g"] if sent else C["y"],
                  self.scan_no, time.monotonic() - t0, len(drills), sent,
                  len(db.watches()), db.cost_of(row), C["0"])
+        db.set_meta("last_scan_ts", db.now())
         tgbot.STATE["last_scan"] = (f"#{self.scan_no} {now_local():%H:%M} "
                                     f"({len(drills)} drills, {sent} signals)")
 
@@ -184,7 +218,30 @@ class Engine:
             await self.agent.recheck(w, enc, hours)
 
     # ---------------------------------------------------------------- loops
+    async def startup_scan(self):
+        """One scan on boot so a restart mid-window is not dead time."""
+        if not config.SCAN_ON_START:
+            return
+        if not in_window():
+            log.info("%sstartup outside %s-%s %s — waiting for the window%s",
+                     C["y"], config.ACTIVE_START.strftime("%H:%M"),
+                     config.ACTIVE_END.strftime("%H:%M"), config.LOCAL_TZ.key, C["0"])
+            return
+        mins = db.minutes_since("last_scan_ts")
+        if mins < config.MIN_RESCAN_MINUTES:
+            log.info("last scan was %.0f min ago (< %d) — skipping the startup "
+                     "scan, next one at %s", mins, config.MIN_RESCAN_MINUTES,
+                     upcoming_closes(1)[0].strftime("%H:%M"))
+            return
+        log.info("%sstartup scan (last one %s)%s", C["b"],
+                 "never" if mins > 1e8 else f"{mins:.0f} min ago", C["0"])
+        try:
+            await self.scan()
+        except Exception as ex:
+            log.exception("startup scan failed: %s", ex)
+
     async def scan_loop(self):
+        await self.startup_scan()
         while True:
             wait = next_close(config.HTF_SECONDS)
             await heartbeat(wait, "next 4h close in")
@@ -237,6 +294,17 @@ async def amain():
     log.info("model=%s effort=%s · top %d coins · %s x%d scan, %s x%d drill",
              config.MODEL, config.REASONING_EFFORT, config.WATCHLIST_SIZE,
              config.HTF, config.HTF_CANDLES, config.LTF, config.LTF_CANDLES)
+
+    utc = datetime.now(timezone.utc)
+    sysname = str(datetime.now().astimezone().tzinfo)
+    log.info("clocks: server %s (%s) · UTC %s · %s %s  <- all logs use %s",
+             datetime.now().strftime("%H:%M"), sysname, utc.strftime("%H:%M"),
+             now_local().strftime("%H:%M"), config.LOCAL_TZ.key, config.LOCAL_TZ.key)
+    upcoming = [d for d in upcoming_closes(6) if in_window(d)][:4]
+    log.info("window %s-%s %s · next scans: %s",
+             config.ACTIVE_START.strftime("%H:%M"),
+             config.ACTIVE_END.strftime("%H:%M"), config.LOCAL_TZ.key,
+             ", ".join(d.strftime("%a %H:%M") for d in upcoming) or "none in window")
 
     stream = MarketStream()
     await stream.start()

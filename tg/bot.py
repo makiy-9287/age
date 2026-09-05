@@ -173,8 +173,12 @@ async def status(u, c):
         return
     st = STATE.get("stream")
     now = datetime.now(config.LOCAL_TZ)
+    import datetime as _dt
+    sysnow = _dt.datetime.now()
     out = ["<b>Status</b>",
-           f"Local {now:%Y-%m-%d %H:%M} ({config.LOCAL_TZ.key})",
+           f"Trading clock: {now:%Y-%m-%d %H:%M} ({config.LOCAL_TZ.key})",
+           f"Server clock:  {sysnow:%H:%M} ({sysnow.astimezone().tzinfo}) — "
+           f"schedule ignores this",
            f"Window {config.ACTIVE_START:%H:%M}–{config.ACTIVE_END:%H:%M} · "
            f"{'ACTIVE' if STATE.get('in_window') else 'IDLE'}",
            f"Dispatch {'PAUSED' if STATE.get('paused') else 'ON'}",
