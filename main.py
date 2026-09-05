@@ -116,110 +116,108 @@ class Engine:
         self.scan_no = 0
         self._last_refresh_day = None
 
-    # ------------------------------------------------------------- 4h scan
-    def build_htf(self):
-        views, encoded = {}, []
-        for u in self.stream.universe:
-            sym = u["symbol"]
-            df = self.stream.get(sym, config.HTF)
+    # ------------------------------------------------------------- payloads
+    def views_for(self, sym: str, meta: dict) -> dict:
+        out = {}
+        for tf in config.TIMEFRAMES:
             try:
-                v = features.build_view(u, df, config.HTF)
+                v = features.build_view(meta, self.stream.get(sym, tf), tf)
             except Exception as ex:
-                log.debug("build failed %s: %s", sym, ex)
+                log.debug("build failed %s %s: %s", sym, tf, ex)
                 continue
-            if not v:
-                continue
-            views[sym] = v
-            encoded.append((v, sym))
-        return views, encoded
+            if v:
+                out[tf] = v
+        return out
 
+    def build_all(self):
+        out = []
+        for u in self.stream.universe:
+            views = self.views_for(u["symbol"], u)
+            if len(views) == len(config.TIMEFRAMES):
+                out.append((u["symbol"], views))
+        return out
+
+    # ------------------------------------------------------------ 4h scan
     async def scan(self):
         self.scan_no += 1
         t0 = time.monotonic()
-        print(" " * 78, end="\r")
-        log.info("%s4h scan #%d — %d coins%s", C["b"], self.scan_no,
-                 len(self.stream.universe), C["0"])
+        clear_line()
+        log.info("%s4h bulk scan #%d — %d coins x %s%s", C["b"], self.scan_no,
+                 len(self.stream.universe), "/".join(config.MAIN_TFS), C["0"])
 
-        views, pairs = await asyncio.get_running_loop().run_in_executor(
-            None, self.build_htf)
-        if not pairs:
-            log.warning("no 4h data ready")
+        built = await asyncio.get_running_loop().run_in_executor(None, self.build_all)
+        if not built:
+            log.warning("no data ready — websockets may still be warming up")
             return
 
         extras = {}
         try:
-            extras = await self.stream.fetch_extras([s for _, s in pairs])
+            extras = await self.stream.fetch_extras([s for s, _ in built])
         except Exception as ex:
             log.warning("extras unavailable: %s", ex)
 
-        encoded = []
-        for v, sym in pairs:
+        payloads = []
+        for sym, views in built:
             ex = {"rs": self.stream.relative_strength(sym), "mkt": extras.get(sym)}
-            encoded.append(features.encode_view(v, ex))
-        self.agent.tb.symbols = {e["s"]: s for e, (_, s) in zip(encoded, pairs)}
+            payloads.append(features.encode_full(views, ex))
+        self.agent.tb.symbols = {p["s"]: s for p, (s, _) in zip(payloads, built)}
 
-        near = sum(1 for v, _ in pairs
-                   if (features.nearest_poi_pct(v) or 99) <= config.POI_MAX_DIST_PCT)
-        log.info("built %d views in %.1fs · %d with a POI within %.1f%% of CMP",
-                 len(encoded), time.monotonic() - t0, near, config.POI_MAX_DIST_PCT)
+        near = sum(1 for _, v in built
+                   if (features.nearest_poi_any(v) or 99) <= config.POI_MAX_DIST_PCT)
+        log.info("built %d coins in %.1fs · %d with a POI within %.1f%% of CMP",
+                 len(payloads), time.monotonic() - t0, near, config.POI_MAX_DIST_PCT)
 
         if tgbot.STATE.get("paused"):
             log.info("dispatch paused — scan discarded")
             return
 
-        drills = await self.agent.scan(encoded)
-        log.info("agent requested %d 1h drill-down(s)", len(drills))
-
-        sent = 0
-        for sym, reason in drills:
-            df = self.stream.get(sym, config.LTF)
-            v = features.build_view({"symbol": sym,
-                                     "qv24": next((u["qv24"] for u in self.stream.universe
-                                                   if u["symbol"] == sym), 0),
-                                     "chg": 0.0}, df, config.LTF)
-            if not v:
-                continue
-            enc = features.encode_view(v, {"rs": self.stream.relative_strength(sym),
-                                           "mkt": extras.get(sym)})
-            self.agent.tb.symbols[enc["s"]] = sym
-            sent += await self.agent.drill(sym, reason, enc)
-
-        row = db.usage()
-        log.info("%sscan #%d done in %.0fs — %d drill-down(s), %d signal(s), "
-                 "%d watching · today $%.4f%s", C["g"] if sent else C["y"],
-                 self.scan_no, time.monotonic() - t0, len(drills), sent,
-                 len(db.watches()), db.cost_of(row), C["0"])
+        sent = await self.agent.main_scan(payloads)
         db.set_meta("last_scan_ts", db.now())
+        row = db.usage()
+        log.info("%sscan #%d done in %.0fs — %d flagged, %d signal(s), "
+                 "%d active · today $%.4f%s", C["g"] if sent else C["y"],
+                 self.scan_no, time.monotonic() - t0, len(self.agent.tb.flagged),
+                 sent, len(db.setups()), db.cost_of(row), C["0"])
         tgbot.STATE["last_scan"] = (f"#{self.scan_no} {now_local():%H:%M} "
-                                    f"({len(drills)} drills, {sent} signals)")
+                                    f"({len(self.agent.tb.flagged)} flagged, "
+                                    f"{sent} signals)")
 
-    # --------------------------------------------------------- hourly watch
-    async def hourly(self):
-        db.purge_watches()
-        rows = db.watches()
+    # ------------------------------------------------------- 15-minute loop
+    async def active(self):
+        db.purge_setups()
+        rows = db.setups()
         if not rows:
             return
-        log.info("%shourly re-check — %d coin(s) under watch%s",
-                 C["b"], len(rows), C["0"])
-        for w in rows:
-            sym = w["symbol"]
-            df = self.stream.get(sym, config.LTF)
-            if df is None:
-                db.drop_watch(sym)
+        clear_line()
+        t0 = time.monotonic()
+        meta, payloads = [], []
+        for r in rows:
+            sym = r["symbol"]
+            u = next((x for x in self.stream.universe if x["symbol"] == sym),
+                     {"symbol": sym, "qv24": 0, "chg": 0.0})
+            views = self.views_for(sym, u)
+            if not all(tf in views for tf in config.ACTIVE_TFS):
                 continue
-            v = features.build_view({"symbol": sym, "qv24": 0, "chg": 0.0},
-                                    df, config.LTF)
-            if not v:
-                continue
-            enc = features.encode_view(v, {"rs": self.stream.relative_strength(sym)})
+            enc = features.encode_active(
+                views, {"rs": self.stream.relative_strength(sym)})
             self.agent.tb.symbols[enc["s"]] = sym
-            db.bump_watch(sym)
-            hours = (db.now() - w["created_at"]) / 3600
-            await self.agent.recheck(w, enc, hours)
+            payloads.append(enc)
+            meta.append({"symbol": enc["s"], "bias": r["bias"], "poi": r["poi"],
+                         "trigger": r["trigger"],
+                         "invalidation": r["invalidation"],
+                         "checks": r["checks"],
+                         "age_min": (db.now() - r["created_at"]) // 60})
+            db.bump_setup(sym)
+        if not payloads:
+            return
+        log.info("%s15m check — %d active setup(s): %s%s", C["b"], len(payloads),
+                 ", ".join(m["symbol"] for m in meta), C["0"])
+        sent = await self.agent.active_run(meta, payloads)
+        log.info("15m check done in %.0fs — %d signal(s), %d still active",
+                 time.monotonic() - t0, sent, len(db.setups()))
 
     # ---------------------------------------------------------------- loops
     async def startup_scan(self):
-        """One scan on boot so a restart mid-window is not dead time."""
         if not config.SCAN_ON_START:
             return
         if not in_window():
@@ -229,8 +227,8 @@ class Engine:
             return
         mins = db.minutes_since("last_scan_ts")
         if mins < config.MIN_RESCAN_MINUTES:
-            log.info("last scan was %.0f min ago (< %d) — skipping the startup "
-                     "scan, next one at %s", mins, config.MIN_RESCAN_MINUTES,
+            log.info("last scan %.0f min ago (< %d) — skipping startup scan, "
+                     "next at %s", mins, config.MIN_RESCAN_MINUTES,
                      upcoming_closes(1)[0].strftime("%H:%M"))
             return
         log.info("%sstartup scan (last one %s)%s", C["b"],
@@ -243,37 +241,32 @@ class Engine:
     async def scan_loop(self):
         await self.startup_scan()
         while True:
-            wait = next_close(config.HTF_SECONDS)
-            await heartbeat(wait, "next 4h close in")
+            await heartbeat(next_close(config.MAIN_SECONDS), "next 4h scan in")
             if not in_window():
-                log.info("%s4h close outside %s–%s %s — skipping scan%s", C["y"],
-                         config.ACTIVE_START.strftime("%H:%M"),
-                         config.ACTIVE_END.strftime("%H:%M"),
-                         config.LOCAL_TZ.key, C["0"])
+                log.info("%s4h close outside the window — skipping bulk scan%s",
+                         C["y"], C["0"])
                 continue
             try:
                 await self.scan()
             except Exception as ex:
                 log.exception("scan failed: %s", ex)
 
-    async def hourly_loop(self):
+    async def active_loop(self):
         while True:
-            wait = next_close(config.LTF_SECONDS)
-            await asyncio.sleep(wait)
+            await asyncio.sleep(next_close(config.ACTIVE_SECONDS))
             if not in_window():
                 continue
             try:
-                await self.hourly()
+                await self.active()
             except Exception as ex:
-                log.exception("hourly re-check failed: %s", ex)
+                log.exception("15m check failed: %s", ex)
 
     async def refresh_loop(self):
         while True:
             now = now_local()
-            day = now.date()
-            if (self._last_refresh_day != day
+            if (self._last_refresh_day != now.date()
                     and now.time() >= config.WATCHLIST_REFRESH):
-                self._last_refresh_day = day
+                self._last_refresh_day = now.date()
                 try:
                     log.info("%sdaily watchlist refresh%s", C["b"], C["0"])
                     await self.stream.refresh_watchlist()
@@ -291,9 +284,10 @@ async def amain():
     if missing:
         raise SystemExit("Missing in .env: " + ", ".join(missing))
 
-    log.info("model=%s effort=%s · top %d coins · %s x%d scan, %s x%d drill",
-             config.MODEL, config.REASONING_EFFORT, config.WATCHLIST_SIZE,
-             config.HTF, config.HTF_CANDLES, config.LTF, config.LTF_CANDLES)
+    log.info("model=%s effort=%s · top %d coins · %s x%d each · "
+             "bulk scan 4h, active loop 15m", config.MODEL,
+             config.REASONING_EFFORT, config.WATCHLIST_SIZE,
+             "/".join(config.TIMEFRAMES), config.CANDLES)
 
     utc = datetime.now(timezone.utc)
     sysname = str(datetime.now().astimezone().tzinfo)
@@ -321,7 +315,7 @@ async def amain():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     await tg.send(f"🤖 <b>SMC/ICT agent online</b>\nTop {len(stream.universe)} coins · "
-                  f"4h scan at each close · {config.ACTIVE_START:%H:%M}–"
+                  f"4h bulk scan + 15m active loop · {config.ACTIVE_START:%H:%M}–"
                   f"{config.ACTIVE_END:%H:%M} {config.LOCAL_TZ.key}")
 
     stop = asyncio.Event()
@@ -333,7 +327,7 @@ async def amain():
             pass
 
     tasks = [asyncio.create_task(engine.scan_loop()),
-             asyncio.create_task(engine.hourly_loop()),
+             asyncio.create_task(engine.active_loop()),
              asyncio.create_task(engine.refresh_loop()),
              asyncio.create_task(monitor.run_forever()),
              asyncio.create_task(monitor.sample_forever())]

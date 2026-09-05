@@ -21,70 +21,57 @@ log = logging.getLogger("tools")
 
 SIGNAL_FN = {"type": "function", "function": {
     "name": "send_signal",
-    "description": "Dispatch one validated A+ SMC/ICT setup to Telegram.",
+    "description": "Dispatch one validated multi-timeframe sniper entry to Telegram.",
     "parameters": {"type": "object", "properties": {
         "symbol": {"type": "string"},
         "direction": {"type": "string", "enum": ["LONG", "SHORT"]},
-        "mode": {"type": "string", "enum": ["day", "swing"]},
         "entry_type": {"type": "string", "enum": ["CMP", "LIMIT"]},
         "entry_low": {"type": "number"}, "entry_high": {"type": "number"},
         "stop_loss": {"type": "number"},
         "tp1": {"type": "number"}, "tp2": {"type": "number"},
         "tp3": {"type": "number"},
         "confidence": {"type": "integer", "description": "1-10, send only >=7"},
-        "htf_bias": {"type": "string", "description": "the 4h narrative"},
-        "entry_tf": {"type": "string", "enum": ["1h", "4h"]},
+        "htf_bias": {"type": "string", "description": "the 1d/4h narrative"},
+        "entry_tf": {"type": "string", "enum": ["15m", "1h", "4h", "1d"]},
         "poi": {"type": "string",
                 "enum": ["FVG", "OB", "BREAKER", "OTE", "SWEEP"]},
         "confirmations": {"type": "array", "items": {"type": "string"},
-                          "description": "at least 3"},
-        "reasoning": {"type": "string"}},
-        "required": ["symbol", "direction", "mode", "entry_type", "entry_low",
+                          "description": "at least 3, spanning timeframes"},
+        "reasoning": {"type": "string",
+                      "description": "1d context, 4h narrative, 1h shift, 15m trigger"}},
+        "required": ["symbol", "direction", "entry_type", "entry_low",
                      "entry_high", "stop_loss", "tp1", "tp2", "tp3",
                      "confidence", "htf_bias", "entry_tf", "poi",
                      "confirmations", "reasoning"]}}}
 
-GET_1H_FN = {"type": "function", "function": {
-    "name": "get_1h_context",
-    "description": ("Return the 1h structural payload for ONE coin whose 4h "
-                    "scan showed a live POI near CMP. Costs tokens - only call "
-                    "it for coins you would actually trade."),
+FLAG_FN = {"type": "function", "function": {
+    "name": "flag_setup",
+    "description": ("Put a coin on the 15-minute active list. It will be "
+                    "re-read every 15 minutes until it fires or expires."),
     "parameters": {"type": "object", "properties": {
         "symbol": {"type": "string"},
-        "reason": {"type": "string",
-                   "description": "which 4h POI and why, in one line"}},
-        "required": ["symbol", "reason"]}}}
-
-WATCH_FN = {"type": "function", "function": {
-    "name": "watch_hourly",
-    "description": ("Put a coin under hourly re-check until its trigger fires "
-                    "or it invalidates. Use when the entry is close but needs "
-                    "another 1h candle."),
-    "parameters": {"type": "object", "properties": {
-        "symbol": {"type": "string"},
-        "bias": {"type": "string"},
-        "poi": {"type": "string", "description": "the zone being watched"},
+        "bias": {"type": "string", "description": "the 1d/4h direction"},
+        "poi": {"type": "string", "description": "the exact zone, with prices"},
         "trigger": {"type": "string", "description": "concrete entry condition"},
         "invalidation": {"type": "string", "description": "concrete price level"}},
         "required": ["symbol", "bias", "poi", "trigger", "invalidation"]}}}
 
 KEEP_FN = {"type": "function", "function": {
-    "name": "keep_watching",
-    "description": "Setup still forming, invalidation not hit. Stay on watch.",
+    "name": "keep_setup",
+    "description": "Still valid, trigger not fired. Stay on the active list.",
     "parameters": {"type": "object", "properties": {
         "symbol": {"type": "string"}, "note": {"type": "string"}},
         "required": ["symbol", "note"]}}}
 
 DROP_FN = {"type": "function", "function": {
-    "name": "drop_watch",
-    "description": "Setup is dead or invalidated. Stop watching this coin.",
+    "name": "drop_setup",
+    "description": "Invalidated or dead. Remove from the active list.",
     "parameters": {"type": "object", "properties": {
         "symbol": {"type": "string"}, "reason": {"type": "string"}},
         "required": ["symbol", "reason"]}}}
 
-SCAN_TOOLS = [GET_1H_FN]
-DRILL_TOOLS = [SIGNAL_FN, WATCH_FN]
-WATCH_TOOLS = [SIGNAL_FN, KEEP_FN, DROP_FN]
+MAIN_TOOLS = [FLAG_FN, SIGNAL_FN]
+ACTIVE_TOOLS = [SIGNAL_FN, KEEP_FN, DROP_FN]
 
 
 class Rejected(Exception):
@@ -102,9 +89,6 @@ def _validate(a: dict, known: set[str]) -> dict:
     d = str(a.get("direction", "")).upper()
     if d not in ("LONG", "SHORT"):
         raise Rejected("bad direction")
-    mode = str(a.get("mode", "")).lower()
-    if mode not in config.MODES:
-        raise Rejected("bad mode")
     et = str(a.get("entry_type", "")).upper()
     if et not in ("CMP", "LIMIT"):
         raise Rejected("bad entry_type")
@@ -137,7 +121,7 @@ def _validate(a: dict, known: set[str]) -> dict:
     confirms = [str(x) for x in (a.get("confirmations") or [])][:6]
     if len(confirms) < 3:
         raise Rejected("fewer than 3 confirmations")
-    return {"symbol": sym, "direction": d, "mode": mode, "entry_type": et,
+    return {"symbol": sym, "direction": d, "mode": config.MODE, "entry_type": et,
             "entry_low": lo, "entry_high": hi, "stop_loss": sl,
             "tp1": t1, "tp2": t2, "tp3": t3, "confidence": conf,
             "htf_bias": str(a.get("htf_bias", ""))[:160],
@@ -155,57 +139,43 @@ class ToolBox:
         self.stream = stream
         self.known: set[str] = set()
         self.symbols: dict[str, str] = {}
-        self.drills: list[tuple[str, str]] = []   # (symbol, reason) requested
-        self.watch_calls: list[dict] = []
-        self.drop_calls: list[dict] = []
-        self.keep_calls: list[dict] = []
+        self.flagged: list[str] = []
+        
+        
+        
 
     def resolve(self, name: str) -> str:
         name = (name or "").strip()
         return self.symbols.get(name, self.symbols.get(name.split(":")[0], name))
 
-    # -------------------------------------------------------- stage 1 request
-    def request_1h(self, symbol: str, reason: str) -> dict:
-        full = self.resolve(symbol)
-        if self.stream.get(full, config.LTF) is None:
-            return {"error": f"no 1h data for {symbol}"}
-        if len(self.drills) >= config.MAX_DRILLDOWNS:
-            return {"error": "drill-down budget for this scan is used up"}
-        if any(sym == full for sym, _ in self.drills):
-            return {"status": "already queued"}
-        self.drills.append((full, reason))
-        return {"status": "queued",
-                "note": "1h payload will be delivered in the next stage"}
-
-    # --------------------------------------------------------- watch handling
-    def watch(self, a: dict) -> dict:
+    # ------------------------------------------------------- active list
+    def flag(self, a: dict) -> dict:
         sym = self.resolve(a.get("symbol", ""))
-        if not sym or self.stream.get(sym, config.LTF) is None:
+        if not sym or self.stream.get(sym, "15m") is None:
             return {"error": "unknown symbol"}
-        if len(db.watches()) >= config.MAX_WATCHES:
-            return {"error": "watch list is full"}
-        db.add_watch(sym, config.WATCH_MAX_HOURS,
+        if len(db.setups()) >= config.MAX_ACTIVE:
+            return {"error": "active list is full"}
+        db.add_setup(sym, config.SETUP_MAX_HOURS,
                      bias=str(a.get("bias", ""))[:120],
-                     poi=str(a.get("poi", ""))[:120],
+                     poi=str(a.get("poi", ""))[:140],
                      trigger=str(a.get("trigger", ""))[:200],
                      invalidation=str(a.get("invalidation", ""))[:120])
-        self.watch_calls.append({"symbol": sym})
-        log.info("WATCH  %s · trigger: %s", sym.split(":")[0],
-                 str(a.get("trigger", ""))[:80])
-        return {"status": "watching", "expires_hours": config.WATCH_MAX_HOURS}
+        self.flagged.append(sym)
+        log.info("FLAG   %s · %s · trigger: %s", sym.split(":")[0],
+                 str(a.get("bias", ""))[:24], str(a.get("trigger", ""))[:70])
+        return {"status": "on the 15m active list",
+                "expires_hours": config.SETUP_MAX_HOURS}
 
     def keep(self, a: dict) -> dict:
         sym = self.resolve(a.get("symbol", ""))
-        db.bump_watch(sym)
-        self.keep_calls.append({"symbol": sym})
-        log.info("  keep  %s · %s", sym.split(":")[0], str(a.get("note", ""))[:80])
-        return {"status": "still watching"}
+        db.bump_setup(sym)
+        log.info("  keep  %s · %s", sym.split(":")[0], str(a.get("note", ""))[:70])
+        return {"status": "still active"}
 
     def drop(self, a: dict) -> dict:
         sym = self.resolve(a.get("symbol", ""))
-        db.drop_watch(sym)
-        self.drop_calls.append({"symbol": sym})
-        log.info("  drop  %s · %s", sym.split(":")[0], str(a.get("reason", ""))[:80])
+        db.drop_setup(sym)
+        log.info("  drop  %s · %s", sym.split(":")[0], str(a.get("reason", ""))[:70])
         return {"status": "dropped"}
 
     # ------------------------------------------------------------ write tool
@@ -232,11 +202,11 @@ class ToolBox:
 
         sid = db.insert(s)
         db.event(sid, "CREATED", s.get("entry_price"), s["poi"])
-        db.drop_watch(s["symbol"])
+        db.drop_setup(s["symbol"])
         mid = await tg.send(tg.signal_text(s, sid))
         if mid:
             db.update(sid, msg_id=mid)
-        log.info("SIGNAL #%d %s %s %s conf=%d rr=%.2f", sid,
-                 s["symbol"].split(":")[0], s["direction"], s["mode"],
+        log.info("SIGNAL #%d %s %s conf=%d rr=%.2f", sid,
+                 s["symbol"].split(":")[0], s["direction"],
                  s["confidence"], s["rr"])
         return {"status": "sent", "signal_id": sid}

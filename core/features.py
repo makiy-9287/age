@@ -128,8 +128,9 @@ def build_view(meta: dict, df: pd.DataFrame, tf: str) -> dict | None:
 
 
 # ----------------------------------------------------------------- wire format
-def encode_view(view: dict, extras: dict | None = None) -> dict:
-    """Rich view -> compact positional arrays (~500 tokens)."""
+def encode_view(view: dict, extras: dict | None = None,
+                header: bool = True) -> dict:
+    """Rich view -> compact positional arrays. header=False for a nested block."""
     p = view["price"]
     near = config.ZONE_NEAR_PCT.get(view["tf"], 6.0)
 
@@ -137,14 +138,17 @@ def encode_view(view: dict, extras: dict | None = None) -> dict:
         return abs(level - p) / p * 100 <= near
 
     i = view["ind"]
-    out = {
-        "s": view["symbol"].split(":")[0], "tf": view["tf"], "p": _sig(p),
-        "v": _m(view["qv24"]), "ch": round(view["chg"], 1),
+    out = {}
+    if header:
+        out.update({"s": view["symbol"].split(":")[0], "tf": view["tf"],
+                    "p": _sig(p), "v": _m(view["qv24"]),
+                    "ch": round(view["chg"], 1)})
+    out.update({
         "b": view["bias"], "q": view["seq"],
         "e": [f"{t} {d} {n}b @{_sig(lv)}" for t, d, n, lv in view["events"]],
         "i": [i["rsi"], i["rsi_d"], i["ema"][0], i["ema"][1], i["ema"][2],
               i["stack"], i["atr_pct"], i["rvol"], _sig(view["atr"])],
-    }
+    })
 
     f = [[z["k"][0], _sig(z["top"]), _sig(z["bot"]), z["age"], z["fill"],
           _m(z["rq"]), _d((z["top"] + z["bot"]) / 2, p)]
@@ -209,3 +213,80 @@ def nearest_poi_pct(view: dict) -> float | None:
         d = 0.0 if lo <= p <= hi else min(abs(lo - p), abs(hi - p)) / p * 100
         best = d if best is None else min(best, d)
     return round(best, 3) if best is not None else None
+
+
+# --------------------------------------------------------- multi-timeframe wire
+def digest(view: dict) -> dict:
+    """Compact HTF summary for the 15m loop.
+
+    1d and 4h structure cannot change between 15-minute ticks, so resending the
+    full block 64 times a day is waste. This keeps the narrative and the levels
+    that matter and drops the rest.
+    """
+    p = view["price"]
+    out = {"b": view["bias"], "q": view["seq"],
+           "e": [f"{t} {d} {n}b @{_sig(lv)}" for t, d, n, lv in view["events"][-1:]]}
+    r = view["rng"]
+    if r:
+        out["r"] = [_sig(r["hi"]), _sig(r["lo"]), r["pos"], r["z"][0]]
+    poi = ([("f", z["top"], z["bot"], z["k"], z["rq"]) for z in view["fvg"]]
+           + [("o", z["hi"], z["lo"], z["k"], z["rq"]) for z in view["ob"]]
+           + [("k", z["hi"], z["lo"], z["k"], z["rq"]) for z in view["bb"]])
+    poi.sort(key=lambda z: abs((z[1] + z[2]) / 2 - p))
+    out["poi"] = [[k, kind[0], _sig(hi), _sig(lo), _m(rq), _d((hi + lo) / 2, p)]
+                  for k, hi, lo, kind, rq in poi[:2]]
+    liq = view["liq"]
+    tg = {}
+    for side in ("u", "d"):
+        if liq.get(side):
+            z = liq[side][0]
+            tg[side] = [_sig(z["lvl"]), z["t"], _d(z["lvl"], p)]
+    if tg:
+        out["l"] = tg
+    if view.get("vp"):
+        out["poc"] = _sig(view["vp"]["poc"])
+    return out
+
+
+def _header(views: dict, extras: dict | None) -> dict:
+    any_v = next(iter(views.values()))
+    extras = extras or {}
+    out = {"s": any_v["symbol"].split(":")[0], "p": _sig(any_v["price"]),
+           "v": _m(any_v["qv24"]), "ch": round(any_v["chg"], 1)}
+    if extras.get("rs") is not None:
+        out["rs"] = extras["rs"]
+    mk = extras.get("mkt")
+    if mk:
+        out["m"] = [mk.get("fr"), mk.get("oi"), mk.get("oi1"), mk.get("oi4"),
+                    mk.get("ls")]
+    se = any_v["sess"]
+    out["z"] = [se.get("kz"), _sig(se.get("pdh")), _sig(se.get("pdl")),
+                _sig(se.get("do")), _sig(se.get("wo"))]
+    return out
+
+
+def encode_full(views: dict, extras: dict | None = None) -> dict:
+    """Every timeframe in full - the 4h bulk scan payload."""
+    out = _header(views, extras)
+    out["tf"] = {tf: encode_view(views[tf], header=False)
+                 for tf in config.MAIN_TFS if tf in views}
+    return out
+
+
+def encode_active(views: dict, extras: dict | None = None) -> dict:
+    """15m and 1h in full, 4h and 1d digested - the 15-minute loop payload."""
+    out = _header(views, extras)
+    out["tf"] = {tf: encode_view(views[tf], header=False)
+                 for tf in config.ACTIVE_TFS if tf in views}
+    out["htf"] = {tf: digest(views[tf]) for tf in config.DIGEST_TFS if tf in views}
+    return out
+
+
+def nearest_poi_any(views: dict) -> float | None:
+    """Closest live POI across all timeframes, in % from CMP."""
+    best = None
+    for v in views.values():
+        d = nearest_poi_pct(v)
+        if d is not None:
+            best = d if best is None else min(best, d)
+    return best

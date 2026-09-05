@@ -41,7 +41,7 @@ async def help_(u, c):
     if ok(u):
         await reply(u, "/active — open &amp; pending\n/pnl [24h|7d|30d|all]\n"
                        "/report [24h|7d]\n/last [n]\n/cost — token spend\n"
-                       "/watch — coins under hourly watch\n"
+                       "/setups — coins on the 15m active list\n"
                        "/status — scanner state\n/close ID\n/pause /resume")
 
 
@@ -63,7 +63,7 @@ async def active(u, c):
             live = f" · {sign * (p - entry) / entry * 100:+.2f}%"
         tps = "".join("✅" if r[f"tp{i}_hit"] else "▫️" for i in (1, 2, 3))
         out.append(f"\n<code>#{r['id']}</code> <b>{e(r['symbol'].split(':')[0])}</b> "
-                   f"{r['direction']} [{r['mode']}] {r['status']}{live}\n"
+                   f"{r['direction']} {r['status']}{live}\n"
                    f"  E {fmt(r['entry_low'])}-{fmt(r['entry_high'])} · "
                    f"SL {fmt(r['stop_loss'])} {tps}")
     await reply(u, "\n".join(out))
@@ -123,7 +123,7 @@ async def last(u, c):
         t = datetime.fromtimestamp(r["created_at"], tz=timezone.utc).strftime("%m-%d %H:%M")
         pl = f" {r['pnl_pct']:+.2f}%" if r["pnl_pct"] is not None else ""
         out.append(f"<code>#{r['id']}</code> {t} {e(r['symbol'].split(':')[0])} "
-                   f"{r['direction']} [{r['mode']}] {r['status']}{pl}")
+                   f"{r['direction']} {r['status']}{pl}")
     await reply(u, "\n".join(out))
 
 
@@ -151,12 +151,12 @@ async def cost(u, c):
 async def watch(u, c):
     if not ok(u):
         return
-    rows = db.watches()
+    rows = db.setups()
     if not rows:
-        await reply(u, "Nothing under hourly watch.")
+        await reply(u, "No active setups.")
         return
     st = STATE.get("stream")
-    out = [f"<b>Hourly watch ({len(rows)})</b>"]
+    out = [f"<b>Active setups ({len(rows)})</b>"]
     for r in rows:
         p = st.price(r["symbol"]) if st else None
         mins = (int(time.time()) - r["created_at"]) // 60
@@ -183,10 +183,10 @@ async def status(u, c):
            f"{'ACTIVE' if STATE.get('in_window') else 'IDLE'}",
            f"Dispatch {'PAUSED' if STATE.get('paused') else 'ON'}",
            f"Watchlist: top {len(st.universe) if st else '-'} by 24h volume",
-           f"Scan on each {config.HTF} close · drill on {config.LTF} · "
-           f"monitor {config.MONITOR_SECONDS}s",
+           f"Bulk scan every 4h ({'/'.join(config.MAIN_TFS)}) · "
+           f"active loop every 15m",
            f"POI threshold {config.POI_MAX_DIST_PCT}% from CMP",
-           f"Under watch: {len(db.watches())}",
+           f"Active setups: {len(db.setups())}",
            f"Open signals {len(db.open_signals())}"]
     if STATE.get("last_scan"):
         out.append(f"Last scan {STATE['last_scan']}")
@@ -232,7 +232,8 @@ def build() -> Application:
     app = Application.builder().token(config.TG_TOKEN).build()
     for name, fn in {"start": start, "help": help_, "active": active, "pnl": pnl,
                      "report": report, "last": last, "cost": cost,
-                     "status": status, "close": close, "pause": pause, "watch": watch,
+                     "status": status, "close": close, "pause": pause,
+                     "setups": watch, "watch": watch,
                      "resume": resume}.items():
         app.add_handler(CommandHandler(name, fn))
     return app

@@ -108,47 +108,42 @@ class Agent:
                 break
         return sent
 
-    # ---------------------------------------------------------------- stage 1
-    async def scan(self, views: list[dict]) -> list[tuple[str, str]]:
-        """4h screen over the watchlist. Returns [(symbol, reason)] to drill."""
-        self.tb.drills = []
-        self.tb.known = {v["s"] for v in views}
+    # ------------------------------------------------------------ bulk scan
+    async def main_scan(self, payloads: list[dict]) -> int:
+        """4h scan over the whole watchlist. Returns signals sent directly."""
+        self.tb.flagged = []
+        self.tb.known = {c["s"] for c in payloads}
         n = config.COINS_PER_REQUEST
-        batches = [views[i:i + n] for i in range(0, len(views), n)]
-        system = P.SCAN_SYSTEM.replace("{poi}", str(config.POI_MAX_DIST_PCT))
-        handlers = {"get_1h_context":
-                    lambda a: self.tb.request_1h(a.get("symbol", ""),
-                                                 a.get("reason", ""))}
-        log.info("4h scan: %d coins in %d request(s)", len(views), len(batches))
+        batches = [payloads[i:i + n] for i in range(0, len(payloads), n)]
+        system = P.MAIN_SYSTEM.replace("{poi}", str(config.POI_MAX_DIST_PCT))
+        handlers = {"flag_setup": self.tb.flag, "send_signal": self.tb.send_signal}
+        log.info("4h scan: %d coins in %d request(s)", len(payloads), len(batches))
         sem = asyncio.Semaphore(config.AGENT_CONCURRENCY)
 
         async def one(i, b):
             async with sem:
-                await self._run(system,
-                                P.scan_user(i, len(batches), [x["s"] for x in b]),
-                                {"coins": b}, T.SCAN_TOOLS, f"scan {i}/{len(batches)}",
-                                handlers)
+                return await self._run(
+                    system, P.main_user(i, len(batches), [x["s"] for x in b]),
+                    {"coins": b}, T.MAIN_TOOLS, f"scan {i}/{len(batches)}", handlers)
 
-        await asyncio.gather(*[one(i, b) for i, b in enumerate(batches, 1)],
-                             return_exceptions=True)
-        return list(self.tb.drills)
+        res = await asyncio.gather(*[one(i, b) for i, b in enumerate(batches, 1)],
+                                   return_exceptions=True)
+        return sum(r for r in res if isinstance(r, int))
 
-    # ---------------------------------------------------------------- stage 2
-    async def drill(self, symbol: str, reason: str, view: dict) -> int:
+    # --------------------------------------------------------- 15-minute loop
+    async def active_run(self, rows: list[dict], payloads: list[dict]) -> int:
+        """One 15m check across the active setups."""
+        if not payloads:
+            return 0
+        self.tb.known = {c["s"] for c in payloads}
         handlers = {"send_signal": self.tb.send_signal,
-                    "watch_hourly": self.tb.watch}
-        self.tb.known.add(view["s"])
-        return await self._run(P.DRILL_SYSTEM, P.drill_user(view["s"], reason),
-                               view, T.DRILL_TOOLS,
-                               f"drill {view['s']}", handlers)
-
-    # ----------------------------------------------------------- hourly watch
-    async def recheck(self, w, view: dict, hours: float) -> int:
-        handlers = {"send_signal": self.tb.send_signal,
-                    "keep_watching": self.tb.keep,
-                    "drop_watch": self.tb.drop}
-        self.tb.known.add(view["s"])
-        return await self._run(P.WATCH_SYSTEM,
-                               P.watch_user(view["s"], dict(w), int(hours)),
-                               view, T.WATCH_TOOLS,
-                               f"watch {view['s']}", handlers)
+                    "keep_setup": self.tb.keep, "drop_setup": self.tb.drop}
+        n = config.ACTIVE_BATCH
+        sent = 0
+        for i in range(0, len(payloads), n):
+            chunk = payloads[i:i + n]
+            meta = rows[i:i + n]
+            sent += await self._run(P.ACTIVE_SYSTEM, P.active_user(meta),
+                                    {"coins": chunk}, T.ACTIVE_TOOLS,
+                                    f"active {i // n + 1}", handlers)
+        return sent

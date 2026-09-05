@@ -72,7 +72,7 @@ def _strip(t: str) -> str:
     return re.sub(r"<[^>]+>", "", t)
 
 
-MODE = {"day": "📅 DAY", "swing": "🌊 SWING"}
+
 
 
 def signal_text(s: dict, sid: int) -> str:
@@ -91,7 +91,7 @@ def signal_text(s: dict, sid: int) -> str:
     conf = "\n".join(f"  • {e(c)}" for c in (s.get("confirmations") or [])[:5]) or "  • –"
     return (
         f"<b>{'🟢 LONG' if long else '🔴 SHORT'}  |  {e(s['symbol'].split(':')[0])}</b>\n"
-        f"{MODE.get(s['mode'], s['mode'])}  ·  <code>#{sid}</code>  ·  "
+        f"🎯 MTF SNIPER  ·  <code>#{sid}</code>  ·  "
         f"conf {s.get('confidence', '-')}/10\n"
         f"────────────────\n"
         f"<b>Entry ({e(s['entry_type'])}):</b> <code>{ez}</code>\n"

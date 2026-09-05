@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   signal_id INTEGER, ts INTEGER, event TEXT, price REAL, note TEXT);
 
-CREATE TABLE IF NOT EXISTS watches (
+CREATE TABLE IF NOT EXISTS setups (
   symbol TEXT PRIMARY KEY, created_at INTEGER, expires_at INTEGER,
   bias TEXT, poi TEXT, trigger TEXT, invalidation TEXT, checks INTEGER DEFAULT 0);
 
@@ -139,7 +139,7 @@ def performance(ts: int) -> dict:
     wins = [r for r in rows if (r["pnl_pct"] or 0) > 0]
     modes: dict[str, dict] = {}
     for r in rows:
-        m = modes.setdefault(r["mode"], {"n": 0, "w": 0, "pnl": 0.0})
+        m = modes.setdefault(r["mode"] or "mtf", {"n": 0, "w": 0, "pnl": 0.0})
         m["n"] += 1
         m["w"] += 1 if (r["pnl_pct"] or 0) > 0 else 0
         m["pnl"] += r["pnl_pct"] or 0
@@ -178,10 +178,10 @@ def cost_of(row) -> float:
 
 
 # --------------------------------------------------------------------- watches
-def add_watch(symbol: str, hours: int, **f):
+def add_setup(symbol: str, hours: int, **f):
     with _LOCK:
         c = conn()
-        c.execute("""INSERT INTO watches (symbol,created_at,expires_at,bias,poi,
+        c.execute("""INSERT INTO setups (symbol,created_at,expires_at,bias,poi,
                      trigger,invalidation,checks) VALUES (?,?,?,?,?,?,?,0)
                      ON CONFLICT(symbol) DO UPDATE SET expires_at=?, bias=?,
                      poi=?, trigger=?, invalidation=?""",
@@ -192,29 +192,29 @@ def add_watch(symbol: str, hours: int, **f):
         c.commit()
 
 
-def watches():
-    return conn().execute("SELECT * FROM watches WHERE expires_at>? ORDER BY created_at",
+def setups():
+    return conn().execute("SELECT * FROM setups WHERE expires_at>? ORDER BY created_at",
                           (now(),)).fetchall()
 
 
-def drop_watch(symbol: str):
+def drop_setup(symbol: str):
     with _LOCK:
         c = conn()
-        c.execute("DELETE FROM watches WHERE symbol=?", (symbol,))
+        c.execute("DELETE FROM setups WHERE symbol=?", (symbol,))
         c.commit()
 
 
-def bump_watch(symbol: str):
+def bump_setup(symbol: str):
     with _LOCK:
         c = conn()
-        c.execute("UPDATE watches SET checks=checks+1 WHERE symbol=?", (symbol,))
+        c.execute("UPDATE setups SET checks=checks+1 WHERE symbol=?", (symbol,))
         c.commit()
 
 
-def purge_watches():
+def purge_setups():
     with _LOCK:
         c = conn()
-        n = c.execute("DELETE FROM watches WHERE expires_at<=?", (now(),)).rowcount
+        n = c.execute("DELETE FROM setups WHERE expires_at<=?", (now(),)).rowcount
         c.commit()
     return n
 

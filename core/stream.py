@@ -87,8 +87,8 @@ class MarketStream:
         await asyncio.gather(*jobs)
         ready = sum(1 for s in self.frames
                     if len(self.frames[s]) == len(config.TIMEFRAMES))
-        log.info("seeded %d/%d symbols (%s x%d, %s x%d)", ready, len(targets),
-                 config.HTF, config.HTF_CANDLES, config.LTF, config.LTF_CANDLES)
+        log.info("seeded %d/%d symbols · %s x%d each", ready, len(targets),
+                 "/".join(config.TIMEFRAMES), config.CANDLES)
         self._seeded.set()
 
     # ------------------------------------------------------------- websockets
@@ -133,9 +133,8 @@ class MarketStream:
                 df.iloc[-1] = row
             elif not len(df) or ts > int(df.iat[-1, 0]):
                 df.loc[len(df)] = row
-        cap = config.HTF_CANDLES if tf == config.HTF else config.LTF_CANDLES
-        if len(df) > cap:
-            self.frames[sym][tf] = df.iloc[-cap:].reset_index(drop=True)
+        if len(df) > config.CANDLES:
+            self.frames[sym][tf] = df.iloc[-config.CANDLES:].reset_index(drop=True)
 
     async def refresh_watchlist(self):
         """Daily 05:00 rebuild of the top-50 list, then seed anything new."""
