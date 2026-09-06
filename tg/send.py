@@ -2,16 +2,33 @@
 can never take down the scan loop."""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
+from collections import deque
 
 from telegram import Bot
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 import config
 
 log = logging.getLogger("tg")
 _BOT: Bot | None = None
+
+# Messages that could not be delivered are held here and retried, so a Telegram
+# outage never silently loses a signal.
+_QUEUE: deque[tuple[str, str]] = deque(maxlen=config.TG_QUEUE_MAX)
+_ONLINE = True
+
+
+def _request():
+    from telegram.request import HTTPXRequest
+    return HTTPXRequest(proxy=config.TG_PROXY,
+                        connect_timeout=config.TG_TIMEOUT,
+                        read_timeout=config.TG_TIMEOUT,
+                        write_timeout=config.TG_TIMEOUT,
+                        pool_timeout=config.TG_TIMEOUT)
 
 
 def bot() -> Bot:
@@ -19,8 +36,49 @@ def bot() -> Bot:
     if _BOT is None:
         if not config.TG_TOKEN:
             raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
-        _BOT = Bot(config.TG_TOKEN)
+        _BOT = Bot(config.TG_TOKEN, request=_request(),
+                   get_updates_request=_request())
     return _BOT
+
+
+def queued() -> int:
+    return len(_QUEUE)
+
+
+def online() -> bool:
+    return _ONLINE
+
+
+async def check() -> tuple[bool, str]:
+    """One getMe call so a broken Telegram path is obvious at startup."""
+    global _ONLINE
+    try:
+        me = await bot().get_me()
+        _ONLINE = True
+        return True, f"@{me.username}"
+    except Exception as ex:
+        _ONLINE = False
+        return False, str(ex).split("\n")[0][:140]
+
+
+async def flush() -> int:
+    """Retry anything that failed earlier. Called on a timer from main."""
+    global _ONLINE
+    sent = 0
+    while _QUEUE:
+        text, cid = _QUEUE[0]
+        try:
+            await bot().send_message(chat_id=cid, text=text,
+                                     parse_mode=ParseMode.HTML,
+                                     disable_web_page_preview=True)
+            _QUEUE.popleft()
+            sent += 1
+        except Exception:
+            return sent
+    if sent:
+        _ONLINE = True
+        log.info("delivered %d queued message(s)", sent)
+    return sent
 
 
 def set_bot(b: Bot):
@@ -42,6 +100,7 @@ def fmt(p) -> str:
 
 
 async def send(text: str, chat_id: str | None = None) -> int | None:
+    global _ONLINE
     cid = chat_id or config.TG_CHAT
     if not cid:
         log.error("TELEGRAM_CHAT_ID not set")
@@ -51,19 +110,30 @@ async def send(text: str, chat_id: str | None = None) -> int | None:
             m = await bot().send_message(chat_id=cid, text=text,
                                          parse_mode=ParseMode.HTML,
                                          disable_web_page_preview=True)
+            _ONLINE = True
             return m.message_id
+        except BadRequest as ex:
+            # a formatting fault, not a network one - retrying will not help
+            log.error("telegram rejected the message: %s",
+                      str(ex).split("\n")[0][:160])
+            try:
+                m = await bot().send_message(
+                    chat_id=cid, text=html.unescape(_strip(text))[:4000])
+                return m.message_id
+            except Exception:
+                return None
         except Exception as ex:
-            log.error("telegram send failed (%d/3): %s", attempt + 1,
-                      str(ex).split("\n")[0][:200])
-            if attempt == 1:
-                # last resort: strip markup in case the payload broke the parser
-                try:
-                    m = await bot().send_message(chat_id=cid,
-                                                 text=html.unescape(
-                                                     _strip(text))[:4000])
-                    return m.message_id
-                except Exception:
-                    pass
+            if attempt == 2:
+                _ONLINE = False
+                _QUEUE.append((text, cid))
+                log.error("telegram unreachable (%s) - message queued (%d "
+                          "waiting), will retry every %ds",
+                          str(ex).split("\n")[0][:80], len(_QUEUE),
+                          config.TG_RETRY_SECONDS)
+                # never lose a signal to a network fault: print it here too
+                print("\n--- UNDELIVERED ---\n" + _strip(text) + "\n-------------------")
+                return None
+            await asyncio.sleep(2 * (attempt + 1))
     return None
 
 

@@ -4,13 +4,19 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
+import logging
+
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import config
 from storage import db
+from tg import send as sender
 from tg.send import e, fmt
+
+log = logging.getLogger("tgbot")
 
 STATE: dict = {}
 
@@ -187,6 +193,8 @@ async def status(u, c):
            f"active loop every 15m",
            f"POI threshold {config.POI_MAX_DIST_PCT}% from CMP",
            f"Active setups: {len(db.setups())}",
+           f"Telegram: {'online' if sender.online() else 'DEGRADED'}"
+           + (f" · {sender.queued()} queued" if sender.queued() else ""),
            f"Open signals {len(db.open_signals())}"]
     if STATE.get("last_scan"):
         out.append(f"Last scan {STATE['last_scan']}")
@@ -228,8 +236,40 @@ async def resume(u, c):
         await reply(u, "Dispatch resumed.")
 
 
+_LAST_NET_ERR = [0.0, 0]
+
+
+async def on_error(update, context):
+    """Collapse Telegram network errors into one line a minute.
+
+    Left alone, python-telegram-bot logs a full traceback for every failed
+    getUpdates poll - roughly one every four seconds - which buries the
+    scanner's own output completely.
+    """
+    err = context.error
+    if isinstance(err, NetworkError):
+        now = time.time()
+        _LAST_NET_ERR[1] += 1
+        if now - _LAST_NET_ERR[0] >= 60:
+            log.warning("Telegram unreachable — %d polling error(s) in the last "
+                        "minute (%s). Commands are down; signals are queued and "
+                        "retried. Set TELEGRAM_PROXY if this persists.",
+                        _LAST_NET_ERR[1], type(err).__name__)
+            _LAST_NET_ERR[0] = now
+            _LAST_NET_ERR[1] = 0
+        return
+    log.error("telegram handler error: %s", str(err).split("\n")[0][:200])
+
+
 def build() -> Application:
-    app = Application.builder().token(config.TG_TOKEN).build()
+    b = (Application.builder().token(config.TG_TOKEN)
+         .connect_timeout(config.TG_TIMEOUT)
+         .read_timeout(config.TG_TIMEOUT)
+         .get_updates_read_timeout(config.TG_TIMEOUT))
+    if config.TG_PROXY:
+        b = b.proxy(config.TG_PROXY).get_updates_proxy(config.TG_PROXY)
+    app = b.build()
+    app.add_error_handler(on_error)
     for name, fn in {"start": start, "help": help_, "active": active, "pnl": pnl,
                      "report": report, "last": last, "cost": cost,
                      "status": status, "close": close, "pause": pause,

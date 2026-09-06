@@ -61,8 +61,13 @@ def setup_logging():
     fh.setFormatter(LocalTime("%(asctime)s %(levelname)-5s %(name)-7s %(message)s",
                               datefmt="%Y-%m-%d %H:%M:%S"))
     root.addHandler(fh)
-    for n in ("httpx", "httpcore", "telegram", "ccxt", "openai", "asyncio"):
+    for n in ("httpx", "httpcore", "ccxt", "openai", "asyncio"):
         logging.getLogger(n).setLevel(logging.WARNING)
+    # the updater logs a full traceback per failed poll; our own error handler
+    # reports these once a minute instead
+    for n in ("telegram", "telegram.ext.Updater", "telegram.ext._updater",
+              "telegram.ext.ExtBot", "telegram.bot"):
+        logging.getLogger(n).setLevel(logging.CRITICAL)
 
 
 log = logging.getLogger("main")
@@ -281,6 +286,17 @@ class Engine:
             await asyncio.sleep(60)
 
 
+async def retry_loop():
+    """Re-send anything Telegram refused while it was unreachable."""
+    while True:
+        await asyncio.sleep(config.TG_RETRY_SECONDS)
+        try:
+            if tg.queued():
+                await tg.flush()
+        except Exception:
+            pass
+
+
 async def amain():
     setup_logging()
     db.conn()
@@ -323,11 +339,25 @@ async def amain():
 
     app = tgbot.build()
     tg.set_bot(app.bot)
+    reachable, detail = await tg.check()
+    if reachable:
+        log.info("telegram: connected as %s%s", detail,
+                 f" via proxy {config.TG_PROXY}" if config.TG_PROXY else "")
+    else:
+        log.error("%stelegram UNREACHABLE: %s%s", C["y"], detail, C["0"])
+        log.error("  signals will be queued and retried every %ds, and printed "
+                  "here so nothing is lost.", config.TG_RETRY_SECONDS)
+        log.error("  api.telegram.org is blocked from some regions — set "
+                  "TELEGRAM_PROXY=http://user:pass@host:port in .env")
     tgbot.STATE.update({"stream": stream, "monitor": monitor, "engine": engine,
                         "paused": False})
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+    if config.TG_POLLING:
+        await app.updater.start_polling(drop_pending_updates=True)
+    else:
+        log.info("telegram polling disabled (TELEGRAM_POLLING=0) — "
+                 "outbound signals only")
     await tg.send(f"🤖 <b>SMC/ICT agent online</b>\nTop {len(stream.universe)} coins · "
                   f"4h bulk scan + 15m active loop · {config.ACTIVE_START:%H:%M}–"
                   f"{config.ACTIVE_END:%H:%M} {config.LOCAL_TZ.key}")
@@ -344,7 +374,8 @@ async def amain():
              asyncio.create_task(engine.active_loop()),
              asyncio.create_task(engine.refresh_loop()),
              asyncio.create_task(monitor.run_forever()),
-             asyncio.create_task(monitor.sample_forever())]
+             asyncio.create_task(monitor.sample_forever()),
+             asyncio.create_task(retry_loop())]
     try:
         await stop.wait()
     finally:
@@ -353,7 +384,8 @@ async def amain():
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         try:
-            await app.updater.stop()
+            if config.TG_POLLING:
+                await app.updater.stop()
             await app.stop()
             await app.shutdown()
         except Exception:

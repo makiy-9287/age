@@ -122,6 +122,13 @@ PRICE_OUT = _f("PRICE_OUT", 1.32)
 # ------------------------------------------------------------------- telegram
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+# api.telegram.org is unreachable from some hosts (mainland-China regions in
+# particular). Point this at a proxy if getMe fails at startup.
+TG_PROXY = os.getenv("TELEGRAM_PROXY", "").strip() or None
+TG_POLLING = _i("TELEGRAM_POLLING", 1)      # 0 = outbound only, no commands
+TG_TIMEOUT = _i("TELEGRAM_TIMEOUT", 30)
+TG_RETRY_SECONDS = _i("TELEGRAM_RETRY_SECONDS", 60)
+TG_QUEUE_MAX = _i("TG_QUEUE_MAX", 200)
 
 # --------------------------------------------------------------------- signals
 MIN_CONFIDENCE = _i("MIN_CONFIDENCE", 7)
