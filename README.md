@@ -69,6 +69,23 @@ There is no day/swing split. One multi-timeframe read: 1d gives direction, 4h
 the narrative and the POI, 1h the structure shift with displacement, 15m the
 trigger. All four must agree.
 
+## How the agent chooses
+
+The prompt grades every candidate on a 10-point rubric — HTF agreement, correct
+half of the range, a reclaimed sweep, an untapped POI, real resting liquidity,
+displacement on the origin leg, unswept liquidity to target, a tight
+invalidation, momentum agreement, and session/positioning context. 8+ is A+,
+6-7 is decent, below 6 is left alone.
+
+It must then rank the whole batch and flag **at most `MAX_FLAGS_PER_SCAN` (4)**,
+strongest first — the tool refuses past that, so the slots have to be spent on
+its best work. Each flag states its score and top three reasons in the log, so
+the choice is auditable.
+
+Alignment is defined properly: a trade must agree with the **1d/4h draw on
+liquidity**, not with all four bias labels. Price retracing down into a discount
+POI with 1h and 15m bearish is the pullback — required, not disqualifying.
+
 ## Token cost
 
 | | per call | per day | tokens/day |
@@ -85,6 +102,23 @@ trigger. All four must agree.
 `MAX_ACTIVE=8` caps the active list, which caps the bill. `/cost` reports real
 spend from the API's own cache-hit / cache-miss token counts — set
 `PRICE_IN_MISS` from your DeepSeek dashboard first.
+
+## If Telegram is unreachable
+
+Some hosting regions cannot reach `api.telegram.org`. The bot handles it rather
+than falling over:
+
+- startup runs `getMe` and says plainly whether Telegram is reachable
+- failed sends are **queued and retried** every `TELEGRAM_RETRY_SECONDS`, and
+  printed to the terminal marked `--- UNDELIVERED ---`, so a signal is never
+  lost to a network fault
+- polling errors are collapsed into one summary line a minute instead of a
+  full traceback every four seconds
+- `/status` shows `Telegram: online | DEGRADED · N queued`
+
+If it stays down, set `TELEGRAM_PROXY=http://user:pass@host:port` in `.env`.
+`TELEGRAM_POLLING=0` keeps outbound signals while disabling the command
+interface.
 
 ## Install
 

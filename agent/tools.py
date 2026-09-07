@@ -154,7 +154,10 @@ class ToolBox:
         if not sym or self.stream.get(sym, "15m") is None:
             return {"error": "unknown symbol"}
         if len(db.setups()) >= config.MAX_ACTIVE:
-            return {"error": "active list is full"}
+            return {"error": "active list is full - flag only your strongest"}
+        if len(self.flagged) >= config.MAX_FLAGS_PER_SCAN:
+            return {"error": f"already flagged {config.MAX_FLAGS_PER_SCAN} this "
+                             f"scan, which is the cap - keep only the best"}
         db.add_setup(sym, config.SETUP_MAX_HOURS,
                      bias=str(a.get("bias", ""))[:120],
                      poi=str(a.get("poi", ""))[:140],

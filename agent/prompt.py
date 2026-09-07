@@ -56,10 +56,50 @@ structure.
 15m TRIGGER. The precise entry: price into the refined POI, rejection wick or
     displacement body on c3, and the invalidation only a short distance away.
 
-All four must agree. A 15m trigger against the 4h narrative is a trap, and a
-perfect 4h POI with no 1h structure shift is not yet a trade. Longs only from
-discount toward buyside liquidity; shorts only from premium toward sellside.
-Never buy directly beneath unswept buyside, never sell above unswept sellside.
+ALIGNMENT — read this carefully, it is the most misunderstood part.
+"Aligned" does NOT mean all four timeframes print the same bias. It means the
+trade direction agrees with the 1d/4h DRAW ON LIQUIDITY.
+
+A textbook setup looks like this and you must not reject it:
+  1d bullish · 4h bullish · price retracing DOWN into a 4h discount POI ·
+  1h bias bearish and 15m bearish while it travels there.
+The lower timeframes being opposite is the pullback. It is required, not
+disqualifying. The entry trigger is 1h/15m shifting BACK in the 1d/4h direction
+from inside that POI — a CHoCH with displacement.
+
+So:
+  1d + 4h  set the direction and own the POI. These must agree with the trade.
+  1h       must eventually shift back toward the HTF direction. Until it does,
+           the setup is forming, not dead — that is what flagging is for.
+  15m      is the trigger, and only matters once price is at the POI.
+
+GRADING — score every candidate, then keep only the best.
+Add a point for each, and name the ones you counted in `confirmations`:
+  +1  1d and 4h draw agree on direction
+  +1  price is in the correct half (discount for long, premium for short)
+  +1  a liquidity sweep has already happened on the entry side and was
+      reclaimed (l.sw with reclaimed=1) — a raid the market has finished with
+  +1  the POI is untapped (tapped=0) or price is testing it for the first time
+  +1  the POI holds real resting_quote_vol relative to the coin's 24h volume
+  +1  the origin leg showed displacement (o.displacement_ATR >= 1.5, or an FVG
+      left behind)
+  +1  clear unswept liquidity beyond the entry for TP2/TP3 to target
+  +1  the invalidation is tight — under ~1.5 x the 15m ATR from entry
+  +1  volume/momentum agrees: rvol > 1, RSI not already exhausted in the
+      trade direction, EMA stack not fighting the trade
+  +1  killzone or session timing supports it, or funding/OI positioning is
+      leaning against the crowd rather than with it
+
+  8+  A+ — flag it or signal it
+  6-7 decent — flag only if you have room and nothing better
+  <6  leave it alone
+
+What genuinely disqualifies a trade regardless of score:
+  - direction opposes the 1d/4h draw
+  - buying directly beneath unswept buyside, or selling above unswept sellside
+  - longs from premium, shorts from discount
+  - no POI at all, or the POI is mitigated
+  - an extended move with no POI to retrace into and no liquidity left to take
 """.strip()
 
 # ------------------------------------------------------------------ main scan
@@ -73,17 +113,43 @@ Binance USDⓈ-M perpetual futures. This is the 4-HOUR BULK SCAN over a fixed
 {METHOD}
 
 YOUR JOB HERE — decide which coins go on the 15-minute active list.
-For each coin ask: is there a live POI within {{poi}}% of CMP that the four
-timeframes agree on, such that a sniper entry could realistically trigger before
-the next 4h scan? If yes, call flag_setup with the bias, the exact POI zone, a
-concrete trigger condition and a concrete invalidation price. Those coins are
-then re-read every 15 minutes until they fire or expire.
+You are looking for setups that are FORMING, not finished ones. Flag a coin when
+all of these hold:
+  - the 1d/4h draw on liquidity is clear enough to name a direction
+  - there is a live, unmitigated POI in the correct half of the range for that
+    direction (discount for longs, premium for shorts)
+  - price is at that POI, or can plausibly reach it before the next 4h candle
+    closes. Judge reachability against the 4h ATR in the i array, not a fixed
+    percentage: a POI 3% away on a coin with 2% 4h ATR is well within reach.
+  - there is unswept liquidity beyond it for the trade to target
 
-If a setup is ALREADY triggering right now — price in the POI, 1h structure
-shifted, 15m confirming — call send_signal directly instead of flagging.
+You do NOT need the 1h shift or the 15m trigger yet. Those are exactly what the
+15-minute loop waits for. Requiring them here would mean only ever flagging
+setups that already fired.
 
-Be strict. Most coins on most scans qualify for neither. Flagging a coin you
-would not actually trade costs tokens every 15 minutes for hours.
+If a setup is ALREADY triggering right now — price in the POI, 1h shifted back
+toward the HTF direction, 15m confirming — call send_signal directly instead.
+
+Still exercise judgement: a coin mid-impulse with no POI to retrace into, or one
+whose liquidity has already been taken on both sides, is not a setup. But a
+clean HTF direction plus a live POI within reach IS worth flagging, even if
+nothing has triggered yet.
+
+HOW TO CHOOSE — you are collecting the best setups, not the first acceptable
+ones. Work the whole batch before you commit:
+  1. Read every coin and grade it with the rubric above.
+  2. Rank the ones scoring 6 or more.
+  3. Flag at most {{maxflags}}, strongest first. The flag tool will refuse
+     beyond that, so spend the slots on your best work.
+  4. If two coins offer the same setup shape, keep the one with more resting
+     liquidity in the POI and tighter invalidation — not the one with the
+     bigger recent move.
+
+Before each flag_setup, state the score and the top three reasons in one line so
+the choice is auditable. Write `poi` with real prices, `trigger` as a condition
+that can be checked on a 15m candle, and `invalidation` as a single price.
+Vague triggers like "wait for confirmation" are useless — the 15-minute loop has
+to be able to test them mechanically.
 If nothing qualifies, reply exactly: NONE
 """.strip()
 
@@ -108,14 +174,29 @@ For each coin decide exactly one:
   least 1.5R, TP2 the next pool or opposing OB, TP3 the 4h/1d draw on liquidity
   (major EQH/EQL, pdh/pdl, daily swing).
   LONG: sl < entry_low <= entry_high < tp1 < tp2 < tp3. SHORT reversed.
-  Confidence 1-10, send only >= 7.
+  Confidence 1-10 and it must match the rubric score: send only >= 7, and
+  reserve 9-10 for setups scoring 9+ where the invalidation is genuinely tight.
+  `confirmations` must name the specific points you counted, each tied to a
+  timeframe — "4h bullish BOS at 63120", not "trend is up".
+  `reasoning` walks the chain in order: 1d context, 4h narrative and POI, 1h
+  shift, 15m trigger, then why the stop sits where it sits.
 
 2 STILL VALID, NOT YET → call keep_setup(symbol, note) with one line on what
-  changed since the last check.
+  changed since the last check. Keep only while the thesis is intact: price is
+  still travelling toward the POI, or is inside it and holding. "Nothing
+  happened" three checks running is not a reason to keep — if the setup has
+  gone stale and the draw has weakened, drop it.
 
 3 INVALIDATED or the reason no longer holds → call drop_setup(symbol, reason).
-  A setup that lost its displacement, had its liquidity taken from the wrong
-  side, or drifted away from the POI is dead. Drop it rather than hoping.
+  Drop when: the invalidation price traded, the POI was consumed and rejected
+  the wrong way, the liquidity you were targeting got taken without you, the 4h
+  draw flipped, or price walked far enough away that it cannot return before the
+  setup expires. Drop it rather than hoping — a dead setup costs tokens every
+  fifteen minutes and crowds out a live one.
+
+Upgrading is allowed: if the 1h has now shifted and a better POI has formed
+closer to price than the one you flagged, say so in the keep_setup note and
+trade the new one when it triggers.
 
 Be decisive and be quiet: no prose beyond the tool calls.
 """.strip()

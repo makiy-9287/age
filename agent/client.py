@@ -61,11 +61,18 @@ class Agent:
                  f"{hit or 0:,}", f"{miss or 0:,}", f"{out:,}")
 
     async def _run(self, system: str, user: str, payload, tools, label: str,
-                   handlers: dict) -> int:
+                   handlers: dict, rounds: int = 1) -> int:
+        """One agent turn.
+
+        `rounds` is deliberately 1 for the bulk scan: a second round would
+        resend the entire 45k-token payload just to let the model react to its
+        own tool results, which buys nothing. Models emit all their calls in a
+        single response anyway.
+        """
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": user + dumps(payload)}]
         sent = 0
-        for rnd in range(config.MAX_TOOL_ROUNDS):
+        for rnd in range(max(1, rounds)):
             try:
                 resp = await self._chat(messages, tools)
             except Exception as ex:
@@ -77,7 +84,8 @@ class Agent:
             if not calls:
                 txt = (msg.content or "").strip()
                 if txt and txt.upper() != "NONE":
-                    log.info("  %s: %s", label, txt[:200])
+                    log.info("  %s: %s", label, txt[:700])
+                    db.set_meta("last_note", f"{label}: {txt[:900]}")
                 break
             messages.append({"role": "assistant", "content": msg.content or "",
                              "tool_calls": [
@@ -104,8 +112,8 @@ class Agent:
                     sent += 1
                 messages.append({"role": "tool", "tool_call_id": c.id,
                                  "content": dumps(res)[:3000]})
-            if all(c.function.name != "get_1h_context" for c in calls):
-                break
+            if rnd + 1 >= rounds and len(calls) >= config.BUSY_ROUND_WARN:
+                log.info("  %s: %d tool call(s) in one round", label, len(calls))
         return sent
 
     # ------------------------------------------------------------ bulk scan
@@ -115,7 +123,9 @@ class Agent:
         self.tb.known = {c["s"] for c in payloads}
         n = config.COINS_PER_REQUEST
         batches = [payloads[i:i + n] for i in range(0, len(payloads), n)]
-        system = P.MAIN_SYSTEM.replace("{poi}", str(config.POI_MAX_DIST_PCT))
+        system = (P.MAIN_SYSTEM
+                  .replace("{poi}", str(config.POI_MAX_DIST_PCT))
+                  .replace("{maxflags}", str(config.MAX_FLAGS_PER_SCAN)))
         handlers = {"flag_setup": self.tb.flag, "send_signal": self.tb.send_signal}
         log.info("4h scan: %d coins in %d request(s)", len(payloads), len(batches))
         sem = asyncio.Semaphore(config.AGENT_CONCURRENCY)
@@ -124,7 +134,8 @@ class Agent:
             async with sem:
                 return await self._run(
                     system, P.main_user(i, len(batches), [x["s"] for x in b]),
-                    {"coins": b}, T.MAIN_TOOLS, f"scan {i}/{len(batches)}", handlers)
+                    {"coins": b}, T.MAIN_TOOLS, f"scan {i}/{len(batches)}",
+                    handlers, rounds=1)
 
         res = await asyncio.gather(*[one(i, b) for i, b in enumerate(batches, 1)],
                                    return_exceptions=True)
@@ -145,5 +156,6 @@ class Agent:
             meta = rows[i:i + n]
             sent += await self._run(P.ACTIVE_SYSTEM, P.active_user(meta),
                                     {"coins": chunk}, T.ACTIVE_TOOLS,
-                                    f"active {i // n + 1}", handlers)
+                                    f"active {i // n + 1}", handlers,
+                                    rounds=config.ACTIVE_ROUNDS)
         return sent

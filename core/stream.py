@@ -71,19 +71,37 @@ class MarketStream:
                 for attempt in range(3):
                     try:
                         raw = await self.ex.fetch_ohlcv(sym, tf, limit=limit)
-                        if raw and len(raw) >= 60:
+                        if raw and len(raw) >= 80:
                             df = pd.DataFrame(raw, columns=COLS)
                             self.frames.setdefault(sym, {})[tf] = df
                         return
                     except Exception as e:
                         if attempt == 2:
                             log.debug("seed failed %s %s: %s", sym, tf, e)
-                        await asyncio.sleep(1 + attempt)
+                        await asyncio.sleep(1.5 * (attempt + 1))
 
         targets = only or [u["symbol"] for u in self.universe]
-        jobs = [one(sym, tf, config.CANDLES) for sym in targets
-                for tf in config.TIMEFRAMES]
-        await asyncio.gather(*jobs)
+        await asyncio.gather(*[one(sym, tf, config.CANDLES)
+                               for sym in targets for tf in config.TIMEFRAMES])
+
+        # a couple of symbols reliably lose a timeframe to a transient REST
+        # error; retry just those rather than dropping the coin for the day
+        gaps = [(sym, tf) for sym in targets for tf in config.TIMEFRAMES
+                if tf not in self.frames.get(sym, {})
+                or len(self.frames[sym][tf]) < 80]
+        if gaps:
+            log.info("retrying %d missing timeframe(s): %s", len(gaps),
+                     ", ".join(f"{s.split(':')[0]} {t}" for s, t in gaps[:6])
+                     + (" ..." if len(gaps) > 6 else ""))
+            await asyncio.sleep(2)
+            await asyncio.gather(*[one(s, t, config.CANDLES) for s, t in gaps])
+            still = [(s, t) for s, t in gaps
+                     if t not in self.frames.get(s, {})
+                     or len(self.frames[s][t]) < 80]
+            if still:
+                log.warning("%d timeframe(s) still missing after retry: %s",
+                            len(still),
+                            ", ".join(f"{s.split(':')[0]} {t}" for s, t in still))
         ready = sum(1 for s in self.frames
                     if len(self.frames[s]) == len(config.TIMEFRAMES))
         log.info("seeded %d/%d symbols · %s x%d each", ready, len(targets),

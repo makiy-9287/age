@@ -99,15 +99,26 @@ async def report(u, c):
            f"open <b>{len(db.open_signals())}</b>",
            f"Closed <b>{p['n']}</b> · WR <b>{p['wr']}%</b> · "
            f"<b>{p['pnl']:+.2f}%</b> ({p['r']:+.2f}R)"]
-    if p["modes"]:
-        out.append("\n<b>By mode</b>")
-        for m, v in p["modes"].items():
-            out.append(f"  {m}: {v['n']} · {v['w'] / v['n'] * 100:.0f}% WR · "
+    by_poi = {}
+    for r in db.since(ts):
+        if r["closed_at"]:
+            k = r["poi"] or "?"
+            d = by_poi.setdefault(k, {"n": 0, "w": 0, "pnl": 0.0})
+            d["n"] += 1
+            d["w"] += 1 if (r["pnl_pct"] or 0) > 0 else 0
+            d["pnl"] += r["pnl_pct"] or 0
+    if by_poi:
+        out.append("\n<b>By POI type</b>")
+        for k, v in sorted(by_poi.items(), key=lambda x: -x[1]["n"]):
+            out.append(f"  {k}: {v['n']} · {v['w'] / v['n'] * 100:.0f}% WR · "
                        f"{v['pnl']:+.2f}%")
     row = db.usage()
     if row:
         out.append(f"\nToday: {row['requests']} requests · "
                    f"${db.cost_of(row):.3f}")
+    note = db.get_meta("last_note")
+    if note:
+        out.append(f"\n<b>Agent's last read</b>\n<i>{e(note[:700])}</i>")
     await reply(u, "\n".join(out))
 
 

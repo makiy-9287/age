@@ -103,14 +103,18 @@ TEMPERATURE = _f("TEMPERATURE", 0.2)
 REQUEST_TIMEOUT = _i("REQUEST_TIMEOUT", 300)
 
 COINS_PER_REQUEST = _i("COINS_PER_REQUEST", 25)     # 50 coins -> 2 requests
-MAX_TOOL_ROUNDS = _i("MAX_TOOL_ROUNDS", 4)
+# The bulk scan gets one round: a second would resend the whole payload.
+# The active loop is small, so it can afford a follow-up round.
+ACTIVE_ROUNDS = _i("ACTIVE_ROUNDS", 2)
+BUSY_ROUND_WARN = _i("BUSY_ROUND_WARN", 4)
+MAX_FLAGS_PER_SCAN = _i("MAX_FLAGS_PER_SCAN", 4)
 AGENT_CONCURRENCY = _i("AGENT_CONCURRENCY", 2)
 
 # A 4h POI must be at least this close to CMP before the agent is allowed to
 # spend a 1h drill-down on it.
 # A setup is flagged into the 15m loop only if its POI is this close to CMP.
-POI_MAX_DIST_PCT = _f("POI_MAX_DIST_PCT", 1.5)
-MAX_ACTIVE = _i("MAX_ACTIVE", 8)          # concurrent coins in the 15m loop
+POI_MAX_DIST_PCT = _f("POI_MAX_DIST_PCT", 3.0)
+MAX_ACTIVE = _i("MAX_ACTIVE", 3)          # concurrent coins in the 15m loop
 SETUP_MAX_HOURS = _i("SETUP_MAX_HOURS", 8)   # expiry if it never fires
 ACTIVE_BATCH = _i("ACTIVE_BATCH", 3)      # coins per 15m-loop request
 
